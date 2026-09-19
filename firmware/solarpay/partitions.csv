@@ -1,0 +1,9 @@
+# Byte-identical to the stock badge partition table read back from 0x8000.
+# Keeping the layout unchanged means firmware/backup/badge-a/stock-full-4MB.bin
+# remains a straight full-flash restore image, and phy_init RF calibration
+# stays where the bootloader expects it.
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x4000
+phy_init,   data, phy,      0xd000,   0x1000
+factory,    app,  factory,  0x10000,  0x2a0000
+storage,    data, littlefs, 0x2b0000, 0x140000

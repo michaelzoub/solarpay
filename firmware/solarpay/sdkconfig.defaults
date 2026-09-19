@@ -1,0 +1,51 @@
+# --- target / console -------------------------------------------------------
+CONFIG_IDF_TARGET="esp32c3"
+# The badge has no UART0 header; the console is the native USB-Serial-JTAG.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# --- flash / partitions -----------------------------------------------------
+# DIO @ 80 MHz, 4 MB, matching the stock bootloader's settings.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- clocks -----------------------------------------------------------------
+CONFIG_XTAL_FREQ_40=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+
+# --- Wi-Fi / ESP-NOW --------------------------------------------------------
+# ESP-NOW only: never associates, never starts DHCP, no lwIP traffic. The
+# station interface exists purely to own the 2.4 GHz MAC layer.
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_NVS_ENABLED=n
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+CONFIG_ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM=4
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
+
+# BLE is not used: ESP-NOW is the badge-to-badge radio. Leaving NimBLE out
+# keeps the heap free for Wi-Fi + LVGL on a single-core part.
+CONFIG_BT_ENABLED=n
+
+# --- memory -----------------------------------------------------------------
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+CONFIG_FREERTOS_HZ=1000
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# --- logging ----------------------------------------------------------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
+# --- LVGL fonts used by the SolarPay screens --------------------------------
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_22=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+CONFIG_LV_USE_PERF_MONITOR=n
+CONFIG_LV_COLOR_DEPTH_16=y
