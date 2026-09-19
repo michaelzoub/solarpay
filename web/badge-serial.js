@@ -224,14 +224,8 @@ export class BadgeSerialClient extends EventTarget {
     throw new Error("Badge console is not ready. Turn the badge off, keep USB connected, turn it on normally without holding START, wait for the launcher, then try again. Close the Badge IDE and any other serial monitor first.");
   }
 
-  async readBadgeIdentity() {
-    await this.ensurePrompt();
-    this.matchBuffer = "";
-    await this.sendLine("prov show", { silent: true });
-    const response = await this.waitFor("badge> ", 8000);
-    if (/Unrecognized command/.test(response)) throw new Error("This badge firmware cannot read its provisioned identity. Update the badge firmware and try again.");
-    return parseProvisioningIdentity(response);
-  }
+  // (The stock firmware's "prov show" identity read lived here. Native firmware
+  // answers SP_ID instead; see readBadgeIdentity() below.)
 
   async resyncAfterTransfer(pendingBytes = 0) {
     try {
@@ -297,29 +291,53 @@ export class BadgeSerialClient extends EventTarget {
     await this.sendLine(`SP_WALLET ${address} ${Math.max(0, Math.round(lamports || 0))}`);
   }
 
+  // Resolve on the next parsed line of a given event kind. The raw waitFor()
+  // matches a substring and returns everything BEFORE it, which is useless for
+  // reading a value out of the line that follows the marker.
+  waitForEvent(eventName, timeoutMs = 4000) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.removeEventListener("line", onLine);
+        reject(new Error(`The badge did not send ${eventName} within ${timeoutMs} ms.`));
+      }, timeoutMs);
+      const onLine = ({ detail }) => {
+        if (detail?.kind !== "event" || detail.event !== eventName) return;
+        clearTimeout(timer);
+        this.removeEventListener("line", onLine);
+        resolve(detail.fields || {});
+      };
+      this.addEventListener("line", onLine);
+    });
+  }
+
   // The native firmware has no "badge> " prompt. Readiness is proven by asking
   // for the identity line instead.
   async ensureReady(timeout = 4000) {
-    if (!this.writer) throw new Error("Connect the badge before continuing.");
-    this.matchBuffer = "";
-    await this.sendLine("SP_ID");
-    try {
-      await this.waitFor("SOLARPAY_BADGE:", timeout);
-      return true;
-    } catch {
-      throw new Error("The badge is not responding. Check it is powered on, running SolarPay firmware, and that no other serial monitor (Badge IDE, idf.py monitor) holds the port.");
-    }
+    await this.readBadgeIdentity(timeout);
+    return true;
   }
 
-  async readBadgeIdentity() {
+  async readBadgeIdentity(timeoutMs = 4000) {
     if (!this.writer) throw new Error("Connect the badge before reading its identity.");
-    this.matchBuffer = "";
-    await this.sendLine("SP_ID");
-    const response = await this.waitFor("SOLARPAY_BADGE:", 4000);
-    const at = response.indexOf("SOLARPAY_BADGE:");
-    const [role = "customer", badgeId = ""] = response.slice(at + "SOLARPAY_BADGE:".length).trim().split(/[:\s]/);
-    if (!badgeId) throw new Error("The badge did not report an identity.");
-    return { role, badgeId };
+    let lastError;
+    // The badge announces itself unprompted at boot too, so a couple of tries
+    // covers both a freshly reset badge and one that has been running a while.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const pending = this.waitForEvent("badge_ready", timeoutMs);
+      await this.sendLine("SP_ID");
+      try {
+        const fields = await pending;
+        const badgeId = (fields.badgeId || "").trim();
+        if (/^[0-9a-f]{12}$/i.test(badgeId)) {
+          return { role: (fields.role || "customer").trim(), badgeId };
+        }
+        lastError = new Error(`The badge reported an unusable id: "${badgeId}".`);
+      } catch (error) {
+        lastError = error;
+      }
+      await delay(250);
+    }
+    throw new Error(`${lastError?.message || "The badge did not report an identity."} Check it is powered on, running SolarPay firmware, and that no other serial monitor holds the port.`);
   }
 
   async writeAppFile(slug, path, content, { triggerButton } = {}) {
