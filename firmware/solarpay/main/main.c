@@ -21,6 +21,7 @@
 #include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
@@ -54,9 +55,19 @@ static int64_t  s_paid_until, s_paid_started;
 static bool     s_confirming;
 static char     s_note[64];
 static char     s_payer_id[24];
+static char     s_signature[96];
 static char     s_approved_intent[33];
 
 static char     s_buf_kicker[48], s_buf_value[32], s_buf_detail[64], s_buf_card[160];
+
+// paint() writes the shared s_buf_* strings and then hands them to LVGL, which
+// keeps the pointers. It must therefore run on exactly one task. Radio
+// callbacks (ESP-NOW receive), the serial console task and the button task all
+// want to trigger a repaint, so they set this flag and the main loop does the
+// drawing. Painting from all four raced on those buffers and produced torn text.
+static volatile bool s_repaint = true;
+
+static inline void request_paint(void) { s_repaint = true; }
 
 // --- provisioned wallet, persisted so the sender keeps it on battery --------
 static char     s_wallet[64];
@@ -64,6 +75,28 @@ static uint64_t s_balance_lamports;
 static bool     s_have_wallet;
 
 #define NVS_NS "solarpay"
+
+// The mode is remembered so an unexpected restart -- a brownout on battery,
+// say -- comes back to the mode the badge was in, instead of dropping the payer
+// back to the home screen mid-checkout.
+static void mode_store(int mode)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "mode", (uint8_t)mode);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static int mode_load(void)
+{
+    nvs_handle_t h;
+    uint8_t v = MODE_HOME;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return MODE_HOME;
+    nvs_get_u8(h, "mode", &v);
+    nvs_close(h);
+    return (v == MODE_SENDER || v == MODE_MERCHANT) ? v : MODE_HOME;
+}
 
 static void wallet_load(void)
 {
@@ -231,16 +264,26 @@ static void paint(void)
             m.value = s_buf_value;
             m.detail = "AVAILABLE BALANCE";
             char w[32]; wallet_short(w, sizeof(w));
-            snprintf(s_buf_card, sizeof(s_buf_card), "HOW TO PAY\nHOLD NEAR CHECKOUT\n%s", w);
+            snprintf(s_buf_card, sizeof(s_buf_card), "PRESS A TO PAY\nTHEN KNOCK ON THE TILL\n%s", w);
         } else {
             m.value = "-- SOL";
             m.detail = "WALLET NOT LINKED";
             snprintf(s_buf_card, sizeof(s_buf_card),
-                     "HOW TO PAY\nHOLD NEAR CHECKOUT\nREVIEW, THEN PRESS A");
+                     "NO WALLET LINKED\nCONNECT USB AND RUN\nSETUP ON THE LAPTOP");
         }
-        m.card_border = near ? UI_CYAN : UI_PURPLE; m.card_border_w = near ? 3 : 2;
+        if (splink_is_armed()) {
+            // Initiated, waiting for the tap. Still knows nothing about any
+            // charge -- that only arrives once a merchant is authenticated.
+            m.state = "READY"; m.state_color = UI_CYAN;
+            m.detail = s_note[0] ? s_note : "KNOCK ON THE MERCHANT BADGE";
+            m.card_border = near ? UI_GREEN : UI_CYAN; m.card_border_w = 3;
+            snprintf(s_buf_card, sizeof(s_buf_card), "KNOCK TO PAY\nB CANCEL");
+            m.footer = "B CANCEL   HOME EXIT";
+        } else {
+            m.card_border = near ? UI_CYAN : UI_PURPLE; m.card_border_w = near ? 3 : 2;
+            m.footer = "A PAY   HOME EXIT";
+        }
         m.card_text = s_buf_card;
-        m.footer = "HOME EXIT";
         ui_render(&m); return;
     }
 
@@ -250,10 +293,16 @@ static void paint(void)
         bool settled = strcmp(s_result, "CONFIRMED") == 0;
         uint32_t c = failed ? UI_RED : (settled ? UI_GREEN : UI_YELLOW);
         char amt[24]; money(amt, sizeof(amt), s_lamports);
+        char sig_short[24] = "";
+        if (settled && s_signature[0]) {
+            size_t sl = strlen(s_signature);
+            if (sl > 14) snprintf(sig_short, sizeof(sig_short), "%.6s...%.6s", s_signature, s_signature + sl - 6);
+            else         snprintf(sig_short, sizeof(sig_short), "%.20s", s_signature);
+        }
         snprintf(s_buf_card, sizeof(s_buf_card), "%s\n%s\n%s",
                  settled ? "+ PAYMENT CONFIRMED +" : (failed ? "! CHECK LAPTOP LOG !" : "+ APPROVAL RECEIVED +"),
-                 s_payer_id[0] ? s_payer_id : "PAYER",
-                 failed ? "TRANSACTION NOT SETTLED" : "VERIFYING ON SOLANA");
+                 settled && sig_short[0] ? sig_short : (s_payer_id[0] ? s_payer_id : "PAYER"),
+                 settled ? "SOLANA DEVNET" : (failed ? "TRANSACTION NOT SETTLED" : "VERIFYING ON SOLANA"));
         m.state = failed ? "ERROR" : (settled ? "PAID" : "TAP"); m.state_color = c;
         m.mode = "[ PAYMENT LINK ]"; m.mode_color = c;
         m.kicker = failed ? "PAYMENT STOPPED" : (settled ? "SOLANA SETTLED" : "PAYER APPROVED");
@@ -284,9 +333,9 @@ static void paint(void)
             m.card_border = touching ? UI_GREEN : UI_CYAN; m.card_border_w = 3;
             m.card_text = touching ? "< KNOCK TO PAIR >" : "RIGHT EDGE  >>>";
         } else {
-            m.detail = s_note[0] ? s_note : "WAITING FOR SENDER BADGE";
+            m.detail = s_note[0] ? s_note : "WAITING FOR A PAYER";
             m.card_border = UI_GREEN;
-            m.card_text = "TAP ON RIGHT EDGE  >>>";
+            m.card_text = "PAYER PRESSES A\nTHEN KNOCK  >>>";
         }
         m.footer = "B CANCEL   HOME EXIT";
         ui_render(&m); return;
@@ -324,7 +373,7 @@ static void clear_intent(const char *why)
     s_confirming = false;
     s_note[0] = '\0';
     if (splink_is_armed()) splink_disarm(SPLINK_CLOSE_CANCELLED);
-    paint();
+    request_paint();
 }
 
 // SP1:I:<intent>:<lamports>:<ttl>:<nonce>:<tag>
@@ -367,13 +416,25 @@ static void cb_paired(const splink_peer_t *p, void *ctx)
     char f[96];
     snprintf(f, sizeof(f), "peer_sid=%08" PRIx32 "|rssi=%d", p->sid, p->rssi);
     if (s_mode == MODE_SENDER) {
-        s_confirming = true;
-        s_note[0] = '\0';
+        // We have a counterparty but do not yet know what they want. The
+        // request arrives over the link in a moment.
+        s_confirming = false;
+        snprintf(s_note, sizeof(s_note), "READING THE CHARGE...");
     } else {
         spconsole_emit("peer_detected", f);
-        snprintf(s_note, sizeof(s_note), "PAYER PAIRED - CONFIRM ON THEIR BADGE");
+        snprintf(s_note, sizeof(s_note), "SENDING THE CHARGE...");
+        // Step 5 of the flow: details are exchanged only now that both badges
+        // have discovered and authenticated each other.
+        if (have_intent()) {
+            char req[SPLINK_MAX_MESSAGE];
+            int n = snprintf(req, sizeof(req), "REQ:%s:%" PRIu64 ":%s:%s",
+                             s_intent, s_lamports, s_item, s_nonce);
+            if (splink_send_message(req, (size_t)n) == ESP_OK) {
+                spconsole_emit("charge_sent", f);
+            }
+        }
     }
-    paint();
+    request_paint();
 }
 
 static void cb_ambiguous(int count, void *ctx)
@@ -383,12 +444,30 @@ static void cb_ambiguous(int count, void *ctx)
         char f[48]; snprintf(f, sizeof(f), "reason=ambiguous_tap|count=%d", count);
         spconsole_emit("approval_ignored", f);
     }
-    paint();
+    request_paint();
 }
 
-// Merchant only: an approval arriving over the authenticated link.
 static void cb_message(const char *text, size_t len, void *ctx)
 {
+    // Sender side: the charge, delivered only after authentication.
+    if (s_mode == MODE_SENDER) {
+        char intent[33], item[25], nonce[33];
+        unsigned long long lamports = 0;
+        if (sscanf(text, "REQ:%32[0-9a-f]:%llu:%24[^:]:%32[A-Za-z0-9_-]",
+                   intent, &lamports, item, nonce) != 4) {
+            return;
+        }
+        snprintf(s_intent, sizeof(s_intent), "%s", intent);
+        snprintf(s_nonce, sizeof(s_nonce), "%s", nonce);
+        snprintf(s_item, sizeof(s_item), "%s", item);
+        s_lamports   = (uint64_t)lamports;
+        s_expires_ms = now_ms() + 90000;
+        s_confirming = true;
+        s_note[0] = '\0';
+        ESP_LOGI(TAG, "charge received: %" PRIu64 " lamports for %s", s_lamports, s_item);
+        request_paint();
+        return;
+    }
     if (s_mode != MODE_MERCHANT) return;
     char intent[33], payer[24], nonce[33];
     if (sscanf(text, "A:%32[0-9a-f]:%23[A-Za-z0-9_-]:%32[A-Za-z0-9_-]", intent, payer, nonce) != 3) {
@@ -419,12 +498,12 @@ static void cb_message(const char *text, size_t len, void *ctx)
     s_result_until   = s_result_started + 90000;
     s_intent_packet[0] = s_item_packet[0] = '\0';   // stop broadcasting
     splink_disarm(SPLINK_CLOSE_OK);
-    paint();
+    request_paint();
 }
 
 static void cb_delivered(void *ctx)
 {
-    if (s_mode == MODE_SENDER) { snprintf(s_note, sizeof(s_note), "APPROVAL DELIVERED"); paint(); }
+    if (s_mode == MODE_SENDER) { snprintf(s_note, sizeof(s_note), "APPROVAL DELIVERED"); request_paint(); }
 }
 
 static void cb_send_failed(void *ctx)
@@ -432,7 +511,7 @@ static void cb_send_failed(void *ctx)
     if (s_mode == MODE_SENDER) {
         s_paid_until = 0;
         snprintf(s_note, sizeof(s_note), "MERCHANT DID NOT ANSWER - PRESS A AGAIN");
-        paint();
+        request_paint();
     }
 }
 
@@ -441,43 +520,12 @@ static void cb_closed(splink_close_t why, void *ctx)
     s_confirming = false;
     snprintf(s_note, sizeof(s_note), "%s",
              why == SPLINK_CLOSE_EXPIRED ? "PAIRING WINDOW CLOSED" : "LINK CLOSED");
-    paint();
+    request_paint();
 }
 
-// Sender only: the merchant's plaintext checkout broadcast. Deliberately
-// outside the link -- the payer must be able to read the amount before tapping.
-static void cb_broadcast(const char *text, size_t len, const uint8_t mac[6], int8_t rssi, void *ctx)
-{
-    // A badge sitting on the home screen that hears a live checkout is, by
-    // definition, a payer standing at a till. Entering sender mode on its own
-    // is what makes the sender a cable-free device: nothing to press, nothing
-    // to connect, it just shows the amount.
-    if (s_mode == MODE_HOME && strncmp(text, "SP1:I:", 6) == 0) {
-        s_mode = MODE_SENDER;
-        s_home_sel = 0;
-        splink_set_role(SPLINK_ROLE_SENDER);
-        ESP_LOGI(TAG, "entering SENDER mode (checkout heard over the air)");
-    }
-    if (s_mode != MODE_SENDER) return;
-    if (strncmp(text, "SP1:M:", 6) == 0) { parse_item(text); paint(); return; }
-    if (strncmp(text, "SP1:I:", 6) != 0) return;
-
-    char prev[33]; snprintf(prev, sizeof(prev), "%s", s_intent);
-    if (!parse_intent(text)) return;
-    bool fresh = strcmp(prev, s_intent) != 0;
-    if (fresh) {
-        strcpy(s_item, "PAYMENT");
-        s_confirming = false;
-        s_paid_until = 0;
-        // A payment request is the only thing that opens a pairing window.
-        if (!splink_is_armed()) {
-            splink_arm();
-            snprintf(s_note, sizeof(s_note), "KNOCK ON THE MERCHANT BADGE");
-        }
-        ESP_LOGI(TAG, "checkout %s for %" PRIu64 " lamports", s_intent, s_lamports);
-    }
-    paint();
-}
+// Nothing is broadcast in the clear any more, so there is no broadcast handler.
+// A sender learns what it is being asked to pay only after it has tapped a
+// merchant and both sides have authenticated each other.
 
 // ---------------------------------------------------------------------------
 // Laptop -> merchant
@@ -490,6 +538,7 @@ static void enter_merchant_if_needed(void)
     if (s_mode == MODE_MERCHANT) return;
     s_mode = MODE_MERCHANT;
     s_home_sel = 1;
+    mode_store(MODE_MERCHANT);
     splink_set_role(SPLINK_ROLE_MERCHANT);
     spconsole_identity("merchant", s_badge_id);
     spconsole_emit("app_enter", s_badge_id);
@@ -513,7 +562,7 @@ static void on_intent_line(const char *pkt, void *ctx)
     snprintf(f, sizeof(f), "intent=%s", s_intent);
     spconsole_emit("broadcast_requested", f);
     snprintf(s_note, sizeof(s_note), "WAITING FOR PAYER");
-    paint();
+    request_paint();
 }
 
 static void on_item_line(const char *pkt, void *ctx)
@@ -521,7 +570,7 @@ static void on_item_line(const char *pkt, void *ctx)
     enter_merchant_if_needed();
     snprintf(s_item_packet, sizeof(s_item_packet), "%s", pkt);
     parse_item(pkt);
-    paint();
+    request_paint();
 }
 
 static void on_wallet_line(const char *address, uint64_t lamports, void *ctx)
@@ -531,7 +580,7 @@ static void on_wallet_line(const char *address, uint64_t lamports, void *ctx)
     snprintf(f, sizeof(f), "balance=%" PRIu64, lamports);
     spconsole_emit("wallet_provisioned", f);
     ESP_LOGI(TAG, "wallet provisioned, balance %" PRIu64 " lamports", lamports);
-    paint();
+    request_paint();
 }
 
 static void on_id_request(void *ctx)
@@ -542,12 +591,31 @@ static void on_id_request(void *ctx)
 static void on_confirm_line(const char *intent, void *ctx)
 {
     if (s_mode != MODE_MERCHANT) return;
+    // SP_CONFIRM <intent> [signature] -- the signature is optional so an older
+    // caller that sends only the intent still works.
+    s_signature[0] = '\0';
+    char id[33] = {0};
+    const char *sp = strchr(intent, ' ');
+    if (sp) {
+        size_t n = (size_t)(sp - intent);
+        if (n >= sizeof(id)) n = sizeof(id) - 1;
+        memcpy(id, intent, n);
+        if (sp[1]) {
+            snprintf(s_signature, sizeof(s_signature), "%s", sp + 1);
+            printf("SOLARPAY_EXPLORER:https://explorer.solana.com/tx/%s?cluster=devnet\n",
+                   s_signature);
+            fflush(stdout);
+        }
+    } else {
+        snprintf(id, sizeof(id), "%s", intent);
+    }
+    intent = id;
     strcpy(s_result, "CONFIRMED");
     s_result_started = now_ms(); s_result_until = s_result_started + 5000;
     char f[64]; snprintf(f, sizeof(f), "intent=%s", intent);
     spconsole_emit("settlement_confirmed", f);
     s_intent[0] = '\0'; s_intent_packet[0] = '\0'; s_item_packet[0] = '\0';
-    paint();
+    request_paint();
 }
 
 static void on_fail_line(const char *intent, void *ctx)
@@ -558,7 +626,7 @@ static void on_fail_line(const char *intent, void *ctx)
     char f[64]; snprintf(f, sizeof(f), "intent=%s", intent);
     spconsole_emit("settlement_failed", f);
     s_intent[0] = '\0'; s_intent_packet[0] = '\0'; s_item_packet[0] = '\0';
-    paint();
+    request_paint();
 }
 
 // ---------------------------------------------------------------------------
@@ -572,7 +640,7 @@ static void approve(void)
     if (splink_state() != SPLINK_PAIRED) {
         snprintf(s_note, sizeof(s_note), "KNOCK THE BADGES TOGETHER FIRST");
         bsp_led_set_all(255, 35, 65); bsp_led_show();
-        paint();
+        request_paint();
         return;
     }
     if (splink_is_sending()) return;
@@ -581,13 +649,13 @@ static void approve(void)
     int n = snprintf(msg, sizeof(msg), "A:%s:%s:%s", s_intent, s_badge_id, s_nonce);
     if (splink_send_message(msg, (size_t)n) != ESP_OK) {
         snprintf(s_note, sizeof(s_note), "COULD NOT SEND - TRY AGAIN");
-        paint();
+        request_paint();
         return;
     }
     s_paid_started = now_ms();
     s_paid_until   = s_paid_started + 3000;
     snprintf(s_note, sizeof(s_note), "SENDING APPROVAL...");
-    paint();
+    request_paint();
 }
 
 static void on_button(bsp_btn_t btn, bsp_btn_edge_t edge, void *ctx)
@@ -595,14 +663,15 @@ static void on_button(bsp_btn_t btn, bsp_btn_edge_t edge, void *ctx)
     if (edge != BSP_BTN_PRESSED) return;
 
     if (s_mode == MODE_HOME) {
-        if (btn == BSP_BTN_LEFT)  { s_home_sel = 0; paint(); }
-        if (btn == BSP_BTN_RIGHT) { s_home_sel = 1; paint(); }
+        if (btn == BSP_BTN_LEFT)  { s_home_sel = 0; request_paint(); }
+        if (btn == BSP_BTN_RIGHT) { s_home_sel = 1; request_paint(); }
         if (btn == BSP_BTN_A || btn == BSP_BTN_START) {
             s_mode = s_home_sel == 0 ? MODE_SENDER : MODE_MERCHANT;
+            mode_store(s_mode);
             splink_set_role(s_home_sel == 0 ? SPLINK_ROLE_SENDER : SPLINK_ROLE_MERCHANT);
             if (s_mode == MODE_MERCHANT) spconsole_emit("app_enter", s_badge_id);
             ESP_LOGI(TAG, "mode: %s", s_mode == MODE_SENDER ? "SENDER" : "MERCHANT");
-            paint();
+            request_paint();
         }
         return;
     }
@@ -610,14 +679,27 @@ static void on_button(bsp_btn_t btn, bsp_btn_edge_t edge, void *ctx)
     if (btn == BSP_BTN_HOME) {
         clear_intent(NULL);
         s_mode = MODE_HOME;
+        mode_store(MODE_HOME);
         s_result_until = s_paid_until = 0;
         bsp_led_clear(); bsp_led_show();
-        paint();
+        request_paint();
         return;
     }
 
     if (s_mode == MODE_SENDER) {
         if (btn == BSP_BTN_A && have_intent()) approve();
+        else if (btn == BSP_BTN_A) {
+            // Step 1 of the flow: the sender initiates. Until this press the
+            // badge is not pairable at all, so it cannot be drawn into a
+            // payment by a merchant it was merely standing near.
+            if (!s_have_wallet) {
+                snprintf(s_note, sizeof(s_note), "LINK A WALLET FIRST");
+            } else {
+                splink_arm();
+                snprintf(s_note, sizeof(s_note), "KNOCK ON THE MERCHANT BADGE");
+            }
+            request_paint();
+        }
         else if (btn == BSP_BTN_B && have_intent()) clear_intent("intent_declined");
     } else {
         if (btn == BSP_BTN_B && have_intent()) clear_intent("intent_cancelled");
@@ -638,6 +720,17 @@ void app_main(void)
         ESP_LOGW(TAG, "nvs_flash_init: %s", esp_err_to_name(nvs_err));
     }
     wallet_load();
+
+    esp_reset_reason_t reason = esp_reset_reason();
+    const char *reason_name =
+        reason == ESP_RST_POWERON  ? "power on"        :
+        reason == ESP_RST_BROWNOUT ? "BROWNOUT"        :
+        reason == ESP_RST_PANIC    ? "PANIC (crash)"   :
+        reason == ESP_RST_INT_WDT  ? "interrupt watchdog" :
+        reason == ESP_RST_TASK_WDT ? "task watchdog"   :
+        reason == ESP_RST_SW       ? "software restart":
+        reason == ESP_RST_EXT      ? "external reset"  : "other";
+    ESP_LOGW(TAG, "boot reason: %s (%d)", reason_name, (int)reason);
 
     ESP_ERROR_CHECK(bsp_display_init());
     ESP_ERROR_CHECK(bsp_input_init());
@@ -670,7 +763,11 @@ void app_main(void)
         .on_impact      = cb_impact,
     };
     ESP_ERROR_CHECK(splink_init(SPLINK_ROLE_SENDER, &lcbs));
-    splink_set_broadcast_handler(cb_broadcast, NULL);
+    if (s_mode != MODE_HOME) {
+        splink_set_role(s_mode == MODE_MERCHANT ? SPLINK_ROLE_MERCHANT : SPLINK_ROLE_SENDER);
+        ESP_LOGI(TAG, "restored %s mode from NVS",
+                 s_mode == MODE_MERCHANT ? "MERCHANT" : "SENDER");
+    }
 
     paint();
 
@@ -694,13 +791,9 @@ void app_main(void)
         }
         splink_tick();
 
-        // Merchant rebroadcasts the checkout so any sender in range can read the
-        // amount. This is plaintext and outside the link, on purpose.
-        if (s_mode == MODE_MERCHANT && s_intent_packet[0] && t < s_expires_ms && t >= s_next_bcast) {
-            s_next_bcast = t + 450;
-            splink_broadcast(s_intent_packet, strlen(s_intent_packet));
-            if (s_item_packet[0]) splink_broadcast(s_item_packet, strlen(s_item_packet));
-        }
+        // Nothing about the checkout goes out in the clear. The merchant's
+        // beacon says only "a merchant here is armed"; the amount, item, intent
+        // and nonce travel over the authenticated link after pairing.
 
         // The arming window exists so a badge is never pairable WITHOUT a live
         // checkout -- not to cut one short. A checkout can outlive the 20 s
@@ -720,7 +813,11 @@ void app_main(void)
         }
 
         if (t >= next_led)  { next_led = t + 75; render_leds(); }
-        if (t >= next_paint) { next_paint = t + 200; paint(); }
+        if (s_repaint || t >= next_paint) {
+            s_repaint = false;
+            next_paint = t + 200;
+            paint();
+        }
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }

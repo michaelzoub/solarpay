@@ -662,7 +662,9 @@ export function App() {
       setIntent(submitted.intent); activeIntent.current = submitted.intent; setStep(5);
       await loadTransactions();
       try {
-        await serialClient.current?.pushCheckout(`SP1:C:${current.id}\n`);
+        // Pass the Solana signature through so the badge can show the
+        // transaction and print its devnet explorer URL.
+        await serialClient.current?.pushCheckout(`SP1:C:${current.id} ${submitted.intent?.signature || ""}\n`);
       } catch (receiptError) {
         setSerialMessage(`Payment confirmed, but the badge receipt update failed: ${receiptError.message}`);
       }

@@ -11,7 +11,12 @@ static const char *TAG = "bsp_led";
 
 // Ceiling per channel. The Lua apps drove these LEDs at up to 255; on battery
 // that is enough to brown out the boost converter, so scale into a safe range.
-#define LED_MAX_LEVEL 96
+// Measured concern, not theoretical: this firmware runs Wi-Fi, whose transmit
+// bursts draw current the stock Lua firmware never did, on top of the LEDs the
+// HAL guide already warns can brown out the board on AA power. Half the
+// previous ceiling costs little visually and buys headroom for a radio burst
+// landing on top of a full-brightness frame.
+#define LED_MAX_LEVEL 48
 
 static led_strip_handle_t s_strip;
 

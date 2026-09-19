@@ -276,7 +276,7 @@ export class BadgeSerialClient extends EventTarget {
     for (const line of lines) {
       if (line.startsWith("SP1:I:"))      await this.sendLine(`SP_INTENT ${line}`);
       else if (line.startsWith("SP1:M:")) await this.sendLine(`SP_ITEM ${line}`);
-      else if (line.startsWith("SP1:C:")) await this.sendLine(`SP_CONFIRM ${line.slice(6)}`);
+      else if (line.startsWith("SP1:C:")) await this.sendLine(`SP_CONFIRM ${line.slice(6).trim()}`);
       else if (line.startsWith("SP1:E:")) await this.sendLine(`SP_FAIL ${line.slice(6)}`);
       else throw new Error(`Unrecognised checkout line: ${line.slice(0, 24)}`);
       await delay(40);
