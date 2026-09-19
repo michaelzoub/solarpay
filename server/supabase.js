@@ -20,9 +20,16 @@ export class SupabaseRegistry {
 
   async upsertBadge(badge) {
     const row = toRow(badge);
-    const onConflict = badge.ownerId ? "owner_id" : "badge_id";
+    // The owned-badge conflict target must match badge_wallets_owner_role_idx,
+    // which is UNIQUE(owner_id, role). It was UNIQUE(owner_id) alone, which let
+    // a laptop own only one badge and so made a two-badge payment impossible.
+    const onConflict = badge.ownerId ? OWNER_CONFLICT : "badge_id";
     let { error } = await this.client.from(this.table).upsert(row, { onConflict });
     let compatibility;
+    if (isStaleOwnerIndex(error, onConflict)) {
+      ({ error } = await this.client.from(this.table).upsert(row, { onConflict: "owner_id" }));
+      compatibility = "owner-id-index";
+    }
     if (isMissingOwnerId(error)) {
       ({ error } = await this.client.from(this.table).upsert(withoutOwnerId(row), { onConflict: "badge_id" }));
       compatibility = "legacy-schema";
@@ -35,10 +42,13 @@ export class SupabaseRegistry {
     if (!badges.length) return { status: "synced", table: this.table, count: 0 };
     const owned = badges.filter((badge) => badge.ownerId);
     const unowned = badges.filter((badge) => !badge.ownerId);
-    for (const [group, onConflict] of [[owned, "owner_id"], [unowned, "badge_id"]]) {
+    for (const [group, onConflict] of [[owned, OWNER_CONFLICT], [unowned, "badge_id"]]) {
       if (!group.length) continue;
       const rows = group.map(toRow);
       let { error } = await this.client.from(this.table).upsert(rows, { onConflict });
+      if (isStaleOwnerIndex(error, onConflict)) {
+        ({ error } = await this.client.from(this.table).upsert(rows, { onConflict: "owner_id" }));
+      }
       if (isMissingOwnerId(error)) {
         ({ error } = await this.client.from(this.table).upsert(rows.map(withoutOwnerId), { onConflict: "badge_id" }));
       }
@@ -46,6 +56,21 @@ export class SupabaseRegistry {
     }
     return { status: "synced", table: this.table, count: badges.length };
   }
+}
+
+// supabase/20260919_badge_per_role.sql replaces UNIQUE(owner_id) with
+// UNIQUE(owner_id, role).
+const OWNER_CONFLICT = "owner_id,role";
+
+// The project still has the old UNIQUE(owner_id) index: Postgres rejects an
+// ON CONFLICT target with no matching constraint (42P10). Retry against the old
+// target so an unmigrated project degrades to the old behaviour rather than
+// failing outright.
+function isStaleOwnerIndex(error, attempted) {
+  if (!error || attempted !== OWNER_CONFLICT) return false;
+  return error.code === "42P10" || error.code === "PGRST204"
+    || [error.message, error.details, error.hint].filter(Boolean).join(" ")
+         .toLowerCase().includes("no unique or exclusion constraint");
 }
 
 function withoutOwnerId({ owner_id: _ownerId, ...row }) {

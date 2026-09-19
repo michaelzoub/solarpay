@@ -27,8 +27,33 @@ test("Supabase registry uses the stable owner identity for repeat setups", async
   };
   const registry = new SupabaseRegistry(client, "badge_wallets");
   await registry.upsertBadge({ badgeId: "PAY-001", ownerId: "user-1", role: "customer", publicKey: "public-address" });
-  assert.equal(calls[0].options.onConflict, "owner_id");
+  // Scoped by (owner, role) so one laptop can own a sender and a merchant.
+  assert.equal(calls[0].options.onConflict, "owner_id,role");
   assert.equal(calls[0].rows.owner_id, "user-1");
+});
+
+test("Supabase registry falls back to the old owner_id index when the migration has not been run", async () => {
+  const calls = [];
+  const client = {
+    from(table) {
+      return {
+        upsert: async (rows, options) => {
+          calls.push({ table, rows, options });
+          // Postgres 42P10: no unique constraint matching the ON CONFLICT target.
+          if (options.onConflict === "owner_id,role") {
+            return { error: { code: "42P10", message: "there is no unique or exclusion constraint matching the ON CONFLICT specification" } };
+          }
+          return { error: null };
+        },
+      };
+    },
+  };
+  const registry = new SupabaseRegistry(client, "badge_wallets");
+  const result = await registry.upsertBadge({ badgeId: "PAY-002", ownerId: "user-2", role: "customer", publicKey: "addr" });
+  assert.equal(calls[0].options.onConflict, "owner_id,role");
+  assert.equal(calls[1].options.onConflict, "owner_id");
+  assert.equal(result.status, "synced");
+  assert.equal(result.compatibility, "owner-id-index");
 });
 
 test("Supabase registry falls back to the deployed legacy schema when owner_id is missing", async () => {

@@ -119,6 +119,36 @@ test("every badge.ui.image asset a SolarPay app's main.lua loads is included in 
   }
 });
 
+test("every endpoint that serves a badge app expands its --#include directives", async (t) => {
+  // The badge has no module loader: `require` does not exist, so the SPL1 link
+  // layer reaches main.lua only through the `--#include lib/splink.lua`
+  // directive that server/badge-source.js expands on read. An endpoint that
+  // reads the .lua with plain readFile ships that directive as an ordinary Lua
+  // comment, `splink` resolves to a nil global, and the badge dies at runtime
+  // with "attempt to index a nil value (global 'splink')" inside a UI callback.
+  const f = fixture(); t.after(() => f.store.close());
+  const created = await request(f.app).post("/api/badges").set(auth).send({ role: "customer", badgeId: "include-expansion" }).expect(201);
+  const id = created.body.badgeId;
+  const sources = [
+    ["/api/badge-apps/solarpay", (r) => r.text],
+    ["/api/badge-apps/solarpay?role=merchant", (r) => r.text],
+    ["/api/badge-apps/solarpay-bundle?role=customer", (r) => r.body.source],
+    ["/api/badge-apps/solarpay-bundle?role=merchant", (r) => r.body.source],
+    [`/api/badges/${id}/app`, (r) => r.text],
+    [`/api/badges/${id}/solarpay-app`, (r) => r.text],
+    [`/api/badges/${id}/solarpay-bundle`, (r) => r.body.source],
+    [`/api/badges/${id}/solarpay-bundle?role=merchant`, (r) => r.body.source],
+  ];
+  for (const [url, pick] of sources) {
+    const source = pick(await request(f.app).get(url).set(auth).expect(200));
+    assert.doesNotMatch(source, /^[ \t]*--#include\b/m, `${url} served an unexpanded --#include`);
+    // Expansion is only useful if it actually binds the name the app uses.
+    if (/\bsplink\./.test(source)) {
+      assert.match(source, /^local splink = \(function\(\)$/m, `${url} uses splink. without binding a local splink`);
+    }
+  }
+});
+
 test("guided setup reuses one badge ID and wallet for the authenticated identity", async (t) => {
   const f = fixture(); t.after(() => f.store.close());
   const first = await request(f.app).post("/api/badges").set(auth).send({ role: "customer", badgeId: "lilac-hickory-atlas-west" }).expect(201);
@@ -127,6 +157,36 @@ test("guided setup reuses one badge ID and wallet for the authenticated identity
   assert.equal(second.body.publicKey, first.body.publicKey);
   assert.equal(second.body.reused, true);
   assert.equal(second.body.funding, undefined);
+});
+
+test("one laptop can own a sender and a merchant badge at the same time", async (t) => {
+  // The two-badge payment flow needs both badges registered simultaneously.
+  // Scoping ownership by laptop alone meant the second registration RENAMED the
+  // first badge's row, so the badge that lost its row failed approval with
+  // CUSTOMER_NOT_FOUND.
+  const f = fixture(); t.after(() => f.store.close());
+  const sender = await request(f.app).post("/api/badges").set(auth)
+    .send({ role: "customer", badgeId: "288485d713a0" }).expect(201);
+  const merchant = await request(f.app).post("/api/badges").set(auth)
+    .send({ role: "merchant", badgeId: "288485eae2b4" }).expect(201);
+
+  assert.notEqual(sender.body.badgeId, merchant.body.badgeId);
+  // Distinct wallets: paying yourself is not a payment.
+  assert.notEqual(sender.body.publicKey, merchant.body.publicKey);
+
+  // Both must still resolve after the other was registered.
+  assert.ok(f.store.walletForReference("288485d713a0"), "sender badge disappeared");
+  assert.ok(f.store.walletForReference("288485eae2b4"), "merchant badge disappeared");
+});
+
+test("re-registering a role replaces that role's badge and leaves the other alone", async (t) => {
+  const f = fixture(); t.after(() => f.store.close());
+  await request(f.app).post("/api/badges").set(auth).send({ role: "customer", badgeId: "aaaaaaaaaaaa" }).expect(201);
+  await request(f.app).post("/api/badges").set(auth).send({ role: "merchant", badgeId: "bbbbbbbbbbbb" }).expect(201);
+  await request(f.app).post("/api/badges").set(auth).send({ role: "customer", badgeId: "cccccccccccc" }).expect(200);
+
+  assert.ok(f.store.walletForReference("cccccccccccc"), "replacement sender missing");
+  assert.ok(f.store.walletForReference("bbbbbbbbbbbb"), "merchant should be untouched");
 });
 
 test("setup replaces a legacy generated ID with the connected physical badge ID", async (t) => {
@@ -173,7 +233,7 @@ test("diagnostics export is useful and excludes sensitive wallet data", async (t
   assert.equal(response.body.solanaMode, "mock");
   assert.equal(response.body.database.badges.merchant, 1);
   assert.equal(response.body.database.badges.customer, 1);
-  assert.deepEqual(response.body.database.migrations.map((migration) => migration.version), [1, 2, 3, 4, 5]);
+  assert.deepEqual(response.body.database.migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6]);
   const serialized = JSON.stringify(response.body);
   assert.equal(serialized.includes(f.customer.secretKey.slice(0, 12)), false);
   assert.equal(serialized.includes(f.customer.publicKey), false);

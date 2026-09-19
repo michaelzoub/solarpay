@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { parseBadgeAppSource, parseBadgeLine, parseProvisioningIdentity } from "../web/badge-serial.js";
 import { BadgeSerialClient } from "../web/badge-serial.js";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { readBadgeApp } from "../server/badge-source.js";
 
 test("parses structured SolarPay badge events inside firmware log prefixes", () => {
   assert.deepEqual(parseBadgeLine("I app[solarpay_terminal]: SP_EVT|v=1|seq=4|type=broadcasting|intent=0123abcd"), {
@@ -77,15 +80,25 @@ test("touch diagnostic combines motion and radio for badge contact and retains p
   assert.match(source, /emit\("app_exit"/);
 });
 
-test("SolarPay app paints an 8-bit stateful UI and emits real badge touch and laptop events", async () => {
-  const [customer, merchant] = await Promise.all([
-    readFile(new URL("../badges/solarpay_customer.lua", import.meta.url), "utf8"),
-    readFile(new URL("../badges/solarpay_merchant.lua", import.meta.url), "utf8"),
-  ]);
+test("SolarPay apps keep their UI contract and route approval through SPL1", async () => {
+  const badgeDir = new URL("../badges/", import.meta.url);
+  const customerPath = new URL("solarpay_customer.lua", badgeDir);
+  const merchantPath = new URL("solarpay_merchant.lua", badgeDir);
+  const [customer, merchant] = [
+    readBadgeApp(fileURLToPath(customerPath)),
+    readBadgeApp(fileURLToPath(merchantPath)),
+  ];
+
   for (const source of [customer, merchant]) {
-    assert.ok(Buffer.byteLength(source) < 13 * 1024, "standalone app must stay below the validated 96 KB heap source envelope");
+    // Hard limit from the badge guide. The apps now carry the shared link layer
+    // inline, so this is the number that actually constrains them.
+    assert.ok(Buffer.byteLength(source) < 64 * 1024, "main.lua must fit the badge's 64 KiB limit");
+    // Soft envelope. Source size is not heap usage, but it is the only proxy
+    // available off-hardware, and the badge has ~65 KiB of contiguous heap.
+    assert.ok(Buffer.byteLength(source) < 40 * 1024, "app plus link layer must stay inside the measured source envelope");
     assert.match(source, /heap_kb=96/);
     assert.doesNotMatch(source, /\bpcall\s*\(/);
+    assert.doesNotMatch(source, /setmetatable/, "the badge sandbox documents no metatable support");
     assert.match(source, /badge\.ui\.box\(root,\s*320,\s*240\)/);
     assert.match(source, /"solarpay"/);
     assert.match(source, /badge\.radio\.on_recv/);
@@ -94,52 +107,70 @@ test("SolarPay app paints an 8-bit stateful UI and emits real badge touch and la
     assert.match(source, /emit\("laptop_disconnected"/);
     assert.match(source, /badge\.input\.BUTTON\.AUX1/);
     assert.match(source, /if button==badge\.input\.BUTTON\.AUX1 then[\s\S]*?return/, "USB heartbeat must bypass routine button logging and repainting");
+    // Both sides must actually run the link: feed it motion, tick it, and hand
+    // it received frames. Missing any one of these silently disables pairing.
+    assert.match(source, /link:feed_accel\(/, "the link needs accelerometer samples every tick");
+    assert.match(source, /link:tick\(\)/);
+    assert.match(source, /link:on_frame\(/);
+    assert.match(source, /link:arm\(\)/, "pairing must be armed by a payment, not left on");
+    assert.match(source, /link:disarm\(/, "the pairing window must close again");
+    assert.match(source, /splink\.DEFAULTS\.RSSI_GATE/, "RSSI thresholds must come from the link layer, not be re-invented");
   }
+
   assert.match(customer, /slug=solarpay_sender\n/);
   assert.match(customer, /name=SolarPay Sender\n/);
   assert.match(customer, /icon=GIVE\n/);
-  assert.match(customer, /"CHECK ITEM AND AMOUNT"/);
   assert.match(customer, /"READY TO PAY"/);
   assert.match(customer, /"SEND COINS"/);
-  assert.match(customer, /"A PAY    B DECLINE"/);
   assert.match(customer, /\^SP1:M:/);
   assert.match(customer, /if not qr then qr\s*=\s*badge\.ui\.image\(card,\s*"qr\.bin"\)/, "QR allocation must be deferred until requested");
-  assert.match(customer, /badge\.sensor\.tap\(\)/);
-  assert.match(customer, /badge\.sensor\.shake\(\)/, "a physical bump should accept either firmware motion detector");
   assert.match(customer, /emit\("proximity"/);
   assert.match(customer, /emit\("proximity_lost"/);
   assert.match(customer, /merchant_zone/);
   assert.match(customer, /badge\.led\.set\(1,0,level,level\)/, "sender must illuminate its left facing edge");
-  assert.match(customer, /"< TAP LEFT EDGE ON MERCHANT"/);
   assert.match(customer, /elapsed<1080/, "approval must render three sync-style green pulses");
-  assert.match(customer, /apkt,\s*auntil,\s*anext/, "tap approval must be retried across lossy radio delivery");
-  assert.match(customer, /badge\.radio\.send\(apkt\)/, "tap approval retry must resend the same authenticated packet");
-  assert.match(customer, /badge\.radio\.send\(beacon\)/, "sender beacon must reuse a cached packet");
-  assert.match(customer, /emit\("touch_unpaired"/);
   assert.doesNotMatch(customer, /badge\.fs\.read\("intent\.txt"\)/);
+  // The point of the rework: a tap alone must never pay. Approval is sent only
+  // from the A button, only while a link is established.
+  assert.match(customer, /A CONFIRM    B CANCEL/, "the payer must see an explicit confirmation screen");
+  assert.match(customer, /link\.state~=splink\.PAIRED/, "approval must refuse to send without a live link");
+  assert.match(customer, /local message="A:"\.\.intent/, "the approval payload must bind the intent");
+  assert.match(customer, /link:send_message\(message\)/, "approval must travel over the link, not as a broadcast");
+  assert.doesNotMatch(customer, /badge\.radio\.send\("SP1:A:/, "the unauthenticated approval broadcast must be gone");
+  assert.doesNotMatch(customer, /approve\("radio_tap"\)/, "a bare tap must no longer trigger payment");
+
   assert.match(merchant, /"\[ USB RECEIVE MODE \]"/);
   assert.match(merchant, /"\[ CHECKOUT READY \]"/);
-  assert.match(merchant, /"< BUMP TO PAY >"/);
-  assert.doesNotMatch(merchant, /LISTENING FOR APPROVAL|NO PAYER NEARBY/);
   assert.match(merchant, /badge\.fs\.read\("intent\.txt"\)/);
-  assert.match(merchant, /emit\("approval_received"/);
-  assert.match(merchant, /if approved==a then return end/, "merchant must deduplicate retried approvals");
   assert.match(merchant, /emit\("settlement_confirmed"/);
   assert.match(merchant, /emit\("settlement_failed"/);
   assert.match(merchant, /emit\("proximity"/);
   assert.match(merchant, /emit\("proximity_lost"/);
-  assert.match(merchant, /if payer_mac and now-payer_seen>=2600/, "proximity expiry must not depend on an approval identity");
   assert.match(merchant, /badge\.led\.set\(2,0,level,level\)/, "merchant must illuminate its right facing edge");
   assert.match(merchant, /"TAP ON RIGHT EDGE  >>>"/);
   assert.match(merchant, /level=90\+math\.floor/, "merchant checkout must glow brightly while waiting for a badge");
   assert.match(merchant, /elapsed<1080/, "approval must render three sync-style green pulses");
-  assert.doesNotMatch(merchant, /badge\.sensor\.tap\(\)/);
   assert.match(merchant, /name=SolarPay Merchant\n/);
   assert.match(merchant, /slug=solarpay_merchant\n/);
   assert.match(merchant, /icon=SHOP\n/);
-  assert.match(merchant, /if radio_ok and packet and now<expires/);
-  assert.match(merchant, /badge\.radio\.send\(beacon\)/, "merchant beacon must reuse a cached packet");
-  assert.doesNotMatch(merchant, /if badge\.radio\.send\(packet\) then emit\("broadcast_queued"/, "radio retries must not allocate and log on every send");
+  assert.match(merchant, /if radio_ok and packet and now<expires/, "the intent itself is still broadcast so a payer can read the amount first");
+  // The laptop and backend parse these two lines; changing the radio must not
+  // change them.
+  assert.match(merchant, /badge\.sys\.log\("SOLARPAY_APPROVAL:SP1:A:"/, "the laptop's approval line must keep its wire format");
+  assert.match(merchant, /emit\("approval_received","intent="\.\.a\.\."\|customer_badge_id="/, "the website's settlement trigger must keep its field names");
+  assert.match(merchant, /if approved==a then return end/, "merchant must deduplicate retried approvals");
+  assert.match(merchant, /a~=intent or c~=nonce/, "merchant must still bind the approval to the live intent and nonce");
+  assert.doesNotMatch(merchant, /string\.sub\(payload,1,6\)~="SP1:A:"/, "the broadcast approval path must be gone");
+});
+
+test("the shared link layer passes its own Lua test suite", async (t) => {
+  const lua = spawnSync("lua", ["test/splink.test.lua"], { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8" });
+  if (lua.error) {
+    t.skip("lua is not installed; run `brew install lua` to exercise the link layer");
+    return;
+  }
+  assert.equal(lua.status, 0, lua.stdout + lua.stderr);
+  assert.match(lua.stdout, /0 failed/);
 });
 
 test("parses a combined Lua badge app into uploadable manifest and code", async () => {

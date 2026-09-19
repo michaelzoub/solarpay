@@ -3,10 +3,10 @@ import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { PublicKey } from "@solana/web3.js";
 import path from "node:path";
-import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { adminAuth, laptopAuth } from "./auth.js";
 import { encodeLvglIcon, encodeLvglQr, encodeLvglSolanaLogo } from "./badge-assets.js";
+import { readBadgeApp } from "./badge-source.js";
 import { intentItemPacket, intentPacket } from "./protocol.js";
 
 const badgeId = z.string().regex(/^[A-Za-z0-9_-]{1,63}$/);
@@ -19,7 +19,7 @@ export function createApp({ config, store, solana, registry = null }) {
   app.get("/api/badge-apps/solarpay-bundle", asyncRoute(async (req, res) => {
     const role = req.query.role === "merchant" ? "merchant" : "customer";
     const directory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../badges");
-    const source = await readFile(path.join(directory, `solarpay_${role}.lua`), "utf8");
+    const source = readBadgeApp(path.join(directory, `solarpay_${role}.lua`));
     res.json({ role, source, files: [{ path: "icon.bin", data: encodeLvglIcon(role).toString("base64") }, { path: "solana.bin", data: encodeLvglSolanaLogo().toString("base64") }] });
   }));
   app.get("/api/badge-apps/:role", (req, res) => {
@@ -31,7 +31,10 @@ export function createApp({ config, store, solana, registry = null }) {
           : null;
     if (!filename) return res.status(404).json({ error: "Badge app was not found", code: "APP_NOT_FOUND" });
     const directory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../badges");
-    res.download(path.join(directory, filename), `solarpay-${req.params.role}.lua`);
+    // Served expanded, so a download is a runnable app rather than a source
+    // file with an unresolved --#include in it.
+    res.type("text/plain").attachment(`solarpay-${req.params.role}.lua`)
+      .send(readBadgeApp(path.join(directory, filename)));
   });
 
   app.post("/api/admin/badges", adminAuth(config.adminApiKey), asyncRoute(async (req, res) => {
@@ -69,14 +72,34 @@ export function createApp({ config, store, solana, registry = null }) {
 
   app.post("/api/badges", asyncRoute(async (req, res) => {
     const body = z.object({ badgeId, role: z.enum(["merchant", "customer"]) }).parse(req.body);
-    let profile = store.walletForOwner(req.laptopId);
-    const created = !profile;
-    if (created) {
-      const registered = store.walletFor(body.badgeId);
-      if (registered) return res.status(409).json({ error: "This physical badge ID is already registered", code: "BADGE_ALREADY_REGISTERED" });
-      const wallet = solana.generateWallet();
-      profile = store.registerBadge({ ...body, ownerId: req.laptopId, ...wallet });
-    } else if (profile.badgeId !== body.badgeId) profile = store.reassignBadgeIdForOwner(req.laptopId, body.badgeId);
+    // One laptop may own a customer badge AND a merchant badge, so that a real
+    // two-badge payment works. Scoping only by owner meant registering a second
+    // badge renamed the first instead of adding it, and the badge that lost its
+    // row then failed approval with CUSTOMER_NOT_FOUND.
+    //
+    // Three cases, in order:
+    //   1. this exact badge is already ours -> reuse it, whatever role it was
+    //      first registered under (one physical badge can act as both);
+    //   2. we already own a badge in this role -> this is a replacement for it;
+    //   3. otherwise -> a new badge for this role.
+    const existing = store.walletFor(body.badgeId);
+    if (existing && existing.ownerId && existing.ownerId !== req.laptopId) {
+      return res.status(409).json({ error: "This physical badge ID is already registered", code: "BADGE_ALREADY_REGISTERED" });
+    }
+
+    let profile = existing && existing.ownerId === req.laptopId ? existing : null;
+    let created = false;
+    if (!profile) {
+      const sameRole = store.walletForOwner(req.laptopId, body.role);
+      if (sameRole) {
+        profile = store.reassignBadgeIdForOwner(req.laptopId, body.badgeId, body.role);
+      } else {
+        if (existing) return res.status(409).json({ error: "This physical badge ID is already registered", code: "BADGE_ALREADY_REGISTERED" });
+        const wallet = solana.generateWallet();
+        profile = store.registerBadge({ ...body, ownerId: req.laptopId, ...wallet });
+        created = true;
+      }
+    }
     const registrySync = await mirrorBadge(registry, profile);
     let funding;
     if (created && body.role === "customer") {
@@ -108,7 +131,7 @@ export function createApp({ config, store, solana, registry = null }) {
     if (!wallet) return res.status(404).json({ error: "Registered badge was not found", code: "BADGE_NOT_FOUND" });
     const filename = wallet.role === "merchant" ? "terminal.lua" : "customer.lua";
     const directory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../badges");
-    const source = await readFile(path.join(directory, filename), "utf8");
+    const source = readBadgeApp(path.join(directory, filename));
     const personalized = source.replaceAll("__SOLARPAY_BADGE_ID__", wallet.badgeId).replaceAll("__SOLARPAY_WALLET_ADDRESS__", wallet.publicKey);
     res.set("content-type", "text/x-lua; charset=utf-8");
     res.set("content-disposition", `attachment; filename="solarpay-${wallet.role}-${wallet.badgeId}.lua"`);
@@ -119,7 +142,10 @@ export function createApp({ config, store, solana, registry = null }) {
     const wallet = store.walletFor(req.params.badgeId);
     if (!wallet) return res.status(404).json({ error: "Registered badge was not found", code: "BADGE_NOT_FOUND" });
     const directory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../badges");
-    const source = await readFile(path.join(directory, `solarpay_${wallet.role}.lua`), "utf8");
+    // readBadgeApp, not readFile: the solarpay apps carry a `--#include
+    // lib/splink.lua` directive. Served raw, that line stays a Lua comment and
+    // the installed main.lua faults on the first `splink.` access.
+    const source = readBadgeApp(path.join(directory, `solarpay_${wallet.role}.lua`));
     const lamports = await solana.getBalance(wallet.publicKey);
     const personalized = source
       .replaceAll("__SOLARPAY_BADGE_ID__", wallet.badgeId)
@@ -136,7 +162,7 @@ export function createApp({ config, store, solana, registry = null }) {
     if (!wallet) return res.status(404).json({ error: "Registered badge was not found", code: "BADGE_NOT_FOUND" });
     const appRole = req.query.role === "merchant" ? "merchant" : req.query.role === "customer" ? "customer" : wallet.role;
     const directory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../badges");
-    const source = await readFile(path.join(directory, `solarpay_${appRole}.lua`), "utf8");
+    const source = readBadgeApp(path.join(directory, `solarpay_${appRole}.lua`));
     const lamports = await solana.getBalance(wallet.publicKey);
     const includeQr = appRole === "customer";
     const personalized = source

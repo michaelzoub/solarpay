@@ -16,7 +16,7 @@ export class Store {
 
   migrate() {
     this.db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)");
-    for (const [version, filename] of [[1, "001_initial.sql"], [2, "002_intent_protocol.sql"], [3, "003_badge_owner.sql"], [4, "004_long_badge_ids.sql"], [5, "005_cancelled_intents.sql"]]) {
+    for (const [version, filename] of [[1, "001_initial.sql"], [2, "002_intent_protocol.sql"], [3, "003_badge_owner.sql"], [4, "004_long_badge_ids.sql"], [5, "005_cancelled_intents.sql"], [6, "006_badge_per_role.sql"]]) {
       const applied = this.db.prepare("SELECT 1 FROM schema_migrations WHERE version = ?").get(version);
       if (!applied) {
         const sql = readFileSync(new URL(`../migrations/${filename}`, import.meta.url), "utf8");
@@ -43,14 +43,24 @@ export class Store {
     return this.badgeProfile(this.db.prepare("SELECT * FROM badges WHERE badge_id = ?").get(badgeId), false);
   }
 
-  walletForOwner(ownerId) {
+  // A laptop owns at most one badge PER ROLE. Scoping by owner alone meant
+  // registering a second badge renamed the first one instead of adding it, so a
+  // sender and a merchant could never exist at the same time -- whichever was
+  // set up last was the only badge the backend knew about, and the other got
+  // CUSTOMER_NOT_FOUND at approval time.
+  walletForOwner(ownerId, role = null) {
     if (!ownerId) return null;
-    return this.badgeProfile(this.db.prepare("SELECT * FROM badges WHERE owner_id = ? AND enabled = 1").get(ownerId), false);
+    const row = role
+      ? this.db.prepare("SELECT * FROM badges WHERE owner_id = ? AND role = ? AND enabled = 1").get(ownerId, role)
+      : this.db.prepare("SELECT * FROM badges WHERE owner_id = ? AND enabled = 1").get(ownerId);
+    return this.badgeProfile(row, false);
   }
 
-  reassignBadgeIdForOwner(ownerId, badgeId) {
+  reassignBadgeIdForOwner(ownerId, badgeId, role = null) {
     return this.db.transaction(() => {
-      const current = this.db.prepare("SELECT * FROM badges WHERE owner_id = ? AND enabled = 1").get(ownerId);
+      const current = role
+        ? this.db.prepare("SELECT * FROM badges WHERE owner_id = ? AND role = ? AND enabled = 1").get(ownerId, role)
+        : this.db.prepare("SELECT * FROM badges WHERE owner_id = ? AND enabled = 1").get(ownerId);
       if (!current) return null;
       if (current.badge_id === badgeId) return this.badgeProfile(current, false);
       const claimed = this.db.prepare("SELECT owner_id FROM badges WHERE badge_id = ?").get(badgeId);

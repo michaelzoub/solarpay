@@ -20,8 +20,12 @@ alter table public.badge_wallets
   add constraint badge_wallets_badge_id_check
   check (char_length(badge_id) between 1 and 63);
 
-create unique index if not exists badge_wallets_owner_id_idx
-  on public.badge_wallets (owner_id);
+-- Unique per (owner, role), not per owner: one laptop owns at most one sender
+-- and one merchant badge. See supabase/20260919_badge_per_role.sql.
+drop index if exists public.badge_wallets_owner_id_idx;
+
+create unique index if not exists badge_wallets_owner_role_idx
+  on public.badge_wallets (owner_id, role);
 
 alter table public.badge_wallets enable row level security;
 revoke all on table public.badge_wallets from anon, authenticated;
