@@ -271,6 +271,57 @@ export class BadgeSerialClient extends EventTarget {
     throw lastError;
   }
 
+  // --- native SolarPay firmware -------------------------------------------
+  // The stock firmware took the checkout as a file written through its console.
+  // The native firmware has no filesystem console, so the same content goes
+  // over as plain lines. Callers keep passing the SP1: packets they always did.
+  async pushCheckout(content) {
+    if (!this.writer) throw new Error("Connect the badge before sending a checkout.");
+    const lines = String(content).split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) throw new Error("Empty checkout payload.");
+    for (const line of lines) {
+      if (line.startsWith("SP1:I:"))      await this.sendLine(`SP_INTENT ${line}`);
+      else if (line.startsWith("SP1:M:")) await this.sendLine(`SP_ITEM ${line}`);
+      else if (line.startsWith("SP1:C:")) await this.sendLine(`SP_CONFIRM ${line.slice(6)}`);
+      else if (line.startsWith("SP1:E:")) await this.sendLine(`SP_FAIL ${line.slice(6)}`);
+      else throw new Error(`Unrecognised checkout line: ${line.slice(0, 24)}`);
+      await delay(40);
+    }
+  }
+
+  // Push the wallet and balance the sender shows. The badge keeps these in NVS,
+  // so a sender provisioned once over USB still has them on battery.
+  async provisionWallet(address, lamports) {
+    if (!this.writer) throw new Error("Connect the badge before provisioning.");
+    if (!address) return;
+    await this.sendLine(`SP_WALLET ${address} ${Math.max(0, Math.round(lamports || 0))}`);
+  }
+
+  // The native firmware has no "badge> " prompt. Readiness is proven by asking
+  // for the identity line instead.
+  async ensureReady(timeout = 4000) {
+    if (!this.writer) throw new Error("Connect the badge before continuing.");
+    this.matchBuffer = "";
+    await this.sendLine("SP_ID");
+    try {
+      await this.waitFor("SOLARPAY_BADGE:", timeout);
+      return true;
+    } catch {
+      throw new Error("The badge is not responding. Check it is powered on, running SolarPay firmware, and that no other serial monitor (Badge IDE, idf.py monitor) holds the port.");
+    }
+  }
+
+  async readBadgeIdentity() {
+    if (!this.writer) throw new Error("Connect the badge before reading its identity.");
+    this.matchBuffer = "";
+    await this.sendLine("SP_ID");
+    const response = await this.waitFor("SOLARPAY_BADGE:", 4000);
+    const at = response.indexOf("SOLARPAY_BADGE:");
+    const [role = "customer", badgeId = ""] = response.slice(at + "SOLARPAY_BADGE:".length).trim().split(/[:\s]/);
+    if (!badgeId) throw new Error("The badge did not report an identity.");
+    return { role, badgeId };
+  }
+
   async writeAppFile(slug, path, content, { triggerButton } = {}) {
     if (!this.writer) throw new Error("Connect the badge before sending app data.");
     if (this.installing) throw new Error("Another badge upload is already running.");

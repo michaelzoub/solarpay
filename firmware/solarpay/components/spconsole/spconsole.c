@@ -1,6 +1,7 @@
 #include "spconsole.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/usb_serial_jtag.h"
@@ -36,6 +37,13 @@ static void handle_line(char *line)
         if (s_cbs.on_confirm) s_cbs.on_confirm(line + 11, s_cbs.ctx);
     } else if (strncmp(line, "SP_FAIL ", 8) == 0) {
         if (s_cbs.on_fail) s_cbs.on_fail(line + 8, s_cbs.ctx);
+    } else if (strncmp(line, "SP_WALLET ", 10) == 0) {
+        char addr[64]; unsigned long long lamports = 0;
+        if (sscanf(line + 10, "%63s %llu", addr, &lamports) >= 1 && s_cbs.on_wallet) {
+            s_cbs.on_wallet(addr, (uint64_t)lamports, s_cbs.ctx);
+        }
+    } else if (strcmp(line, "SP_ID") == 0) {
+        if (s_cbs.on_id_request) s_cbs.on_id_request(s_cbs.ctx);
     } else if (strcmp(line, "SP_PING") == 0) {
         spconsole_emit("laptop_connected", NULL);
     }
@@ -94,6 +102,12 @@ void spconsole_emit(const char *kind, const char *fields)
 void spconsole_approval(const char *intent, const char *badge_id, const char *nonce)
 {
     printf("SOLARPAY_APPROVAL:SP1:A:%s:%s:%s\n", intent, badge_id, nonce);
+    fflush(stdout);
+}
+
+void spconsole_identity(const char *role, const char *badge_id)
+{
+    printf("SOLARPAY_BADGE:%s:%s\n", role, badge_id);
     fflush(stdout);
 }
 

@@ -21,6 +21,8 @@
 #include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "spconsole.h"
@@ -54,7 +56,46 @@ static char     s_note[64];
 static char     s_payer_id[24];
 static char     s_approved_intent[33];
 
-static char     s_buf_kicker[48], s_buf_value[32], s_buf_detail[64], s_buf_card[128];
+static char     s_buf_kicker[48], s_buf_value[32], s_buf_detail[64], s_buf_card[160];
+
+// --- provisioned wallet, persisted so the sender keeps it on battery --------
+static char     s_wallet[64];
+static uint64_t s_balance_lamports;
+static bool     s_have_wallet;
+
+#define NVS_NS "solarpay"
+
+static void wallet_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    size_t len = sizeof(s_wallet);
+    if (nvs_get_str(h, "wallet", s_wallet, &len) == ESP_OK && s_wallet[0]) s_have_wallet = true;
+    nvs_get_u64(h, "balance", &s_balance_lamports);
+    nvs_close(h);
+}
+
+static void wallet_store(const char *address, uint64_t lamports)
+{
+    snprintf(s_wallet, sizeof(s_wallet), "%s", address);
+    s_balance_lamports = lamports;
+    s_have_wallet = s_wallet[0] != '\0';
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_str(h, "wallet", s_wallet);
+    nvs_set_u64(h, "balance", lamports);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+// 6 leading and 6 trailing characters, as the Lua apps showed it.
+static void wallet_short(char *out, size_t n)
+{
+    size_t len = strlen(s_wallet);
+    if (len < 18) { snprintf(out, n, "WALLET NOT LINKED"); return; }
+    snprintf(out, n, "%.6s...%s", s_wallet, s_wallet + len - 6);
+}
 
 static inline int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 static bool have_intent(void) { return s_intent[0] != '\0'; }
@@ -185,9 +226,20 @@ static void paint(void)
         m.state = "READY"; m.state_color = UI_PURPLE;
         m.mode = "[ SENDER ]"; m.mode_color = UI_DIM;
         m.kicker = "READY TO PAY"; m.kicker_color = UI_YELLOW;
-        m.value = "-- SOL"; m.detail = "WAITING FOR A CHECKOUT";
+        if (s_have_wallet) {
+            money(s_buf_value, sizeof(s_buf_value), s_balance_lamports);
+            m.value = s_buf_value;
+            m.detail = "AVAILABLE BALANCE";
+            char w[32]; wallet_short(w, sizeof(w));
+            snprintf(s_buf_card, sizeof(s_buf_card), "HOW TO PAY\nHOLD NEAR CHECKOUT\n%s", w);
+        } else {
+            m.value = "-- SOL";
+            m.detail = "WALLET NOT LINKED";
+            snprintf(s_buf_card, sizeof(s_buf_card),
+                     "HOW TO PAY\nHOLD NEAR CHECKOUT\nREVIEW, THEN PRESS A");
+        }
         m.card_border = near ? UI_CYAN : UI_PURPLE; m.card_border_w = near ? 3 : 2;
-        m.card_text = "HOW TO PAY\nHOLD NEAR CHECKOUT\nREVIEW, THEN PRESS A";
+        m.card_text = s_buf_card;
         m.footer = "HOME EXIT";
         ui_render(&m); return;
     }
@@ -241,7 +293,10 @@ static void paint(void)
     }
     {
         bool online = spconsole_laptop_online();
-        snprintf(s_buf_card, sizeof(s_buf_card), "$ SOLARPAY CHECKOUT $\n%s", s_badge_id);
+        {
+            char w[32]; wallet_short(w, sizeof(w));
+            snprintf(s_buf_card, sizeof(s_buf_card), "$ SOLARPAY CHECKOUT $\n%s\n%s", s_badge_id, w);
+        }
         m.state = online ? "ONLINE" : "OFFLINE"; m.state_color = online ? UI_CYAN : UI_PURPLE;
         m.mode = online ? "[ USB RECEIVE MODE ]" : "[ MERCHANT ]"; m.mode_color = online ? UI_CYAN : UI_DIM;
         m.kicker = "READY TO SELL"; m.kicker_color = UI_YELLOW;
@@ -436,6 +491,7 @@ static void enter_merchant_if_needed(void)
     s_mode = MODE_MERCHANT;
     s_home_sel = 1;
     splink_set_role(SPLINK_ROLE_MERCHANT);
+    spconsole_identity("merchant", s_badge_id);
     spconsole_emit("app_enter", s_badge_id);
     ESP_LOGI(TAG, "entering MERCHANT mode (checkout arrived over USB)");
 }
@@ -466,6 +522,21 @@ static void on_item_line(const char *pkt, void *ctx)
     snprintf(s_item_packet, sizeof(s_item_packet), "%s", pkt);
     parse_item(pkt);
     paint();
+}
+
+static void on_wallet_line(const char *address, uint64_t lamports, void *ctx)
+{
+    wallet_store(address, lamports);
+    char f[96];
+    snprintf(f, sizeof(f), "balance=%" PRIu64, lamports);
+    spconsole_emit("wallet_provisioned", f);
+    ESP_LOGI(TAG, "wallet provisioned, balance %" PRIu64 " lamports", lamports);
+    paint();
+}
+
+static void on_id_request(void *ctx)
+{
+    spconsole_identity(s_mode == MODE_MERCHANT ? "merchant" : "customer", s_badge_id);
 }
 
 static void on_confirm_line(const char *intent, void *ctx)
@@ -561,6 +632,13 @@ void app_main(void)
     snprintf(s_badge_id, sizeof(s_badge_id), "%02x%02x%02x%02x%02x%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err != ESP_OK) {
+        // Never erase: nvs holds the badge identity and RF calibration.
+        ESP_LOGW(TAG, "nvs_flash_init: %s", esp_err_to_name(nvs_err));
+    }
+    wallet_load();
+
     ESP_ERROR_CHECK(bsp_display_init());
     ESP_ERROR_CHECK(bsp_input_init());
     ESP_ERROR_CHECK(bsp_led_init());
@@ -574,8 +652,13 @@ void app_main(void)
         .on_item    = on_item_line,
         .on_confirm = on_confirm_line,
         .on_fail    = on_fail_line,
+        .on_wallet  = on_wallet_line,
+        .on_id_request = on_id_request,
     };
     spconsole_init(&ccbs, "merchant");
+    // Announce identity unprompted so a website that connects mid-session and
+    // never sends SP_ID still learns which badge this is.
+    spconsole_identity("customer", s_badge_id);
 
     splink_cbs_t lcbs = {
         .on_paired      = cb_paired,
@@ -591,6 +674,12 @@ void app_main(void)
 
     paint();
 
+    if (s_have_wallet) {
+        char w[32]; wallet_short(w, sizeof(w));
+        ESP_LOGI(TAG, "wallet from NVS: %s, balance %" PRIu64 " lamports", w, s_balance_lamports);
+    } else {
+        ESP_LOGI(TAG, "no wallet provisioned yet (send SP_WALLET <address> <lamports>)");
+    }
     ESP_LOGI(TAG, "SolarPay ready, badge %s, heap %lu",
              s_badge_id, (unsigned long)esp_get_free_heap_size());
 
@@ -611,6 +700,17 @@ void app_main(void)
             s_next_bcast = t + 450;
             splink_broadcast(s_intent_packet, strlen(s_intent_packet));
             if (s_item_packet[0]) splink_broadcast(s_item_packet, strlen(s_item_packet));
+        }
+
+        // The arming window exists so a badge is never pairable WITHOUT a live
+        // checkout -- not to cut one short. A checkout can outlive the 20 s
+        // window (they are issued with up to 90 s TTL), so re-arm while it is
+        // still live. Without this a tap made more than 20 s after the checkout
+        // appeared silently did nothing, with both badges still showing it.
+        if (have_intent() && t < s_expires_ms && !splink_is_armed()
+            && s_approved_intent[0] == '\0' && !s_paid_until) {
+            uint32_t sid = splink_arm();
+            ESP_LOGI(TAG, "re-armed sid=%08" PRIx32 " (checkout still live)", sid);
         }
 
         if (have_intent() && t >= s_expires_ms) clear_intent("intent_expired");

@@ -16,10 +16,17 @@
 //   SP_ITEM   SP1:M:<intent>:<item_name>
 //   SP_CONFIRM <intent>        settlement succeeded on Solana
 //   SP_FAIL    <intent>        settlement failed
+//   SP_WALLET  <address> <lamports>   provision this badge's wallet + balance
+//   SP_ID                      ask the badge to announce its identity
+//
+// SP_WALLET is how the sender gets its balance. The Lua app had these values
+// injected into its source at install time; native firmware stores them in NVS
+// instead, so a sender provisioned once over USB keeps them on battery.
 #pragma once
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +37,8 @@ typedef struct {
     void (*on_item)(const char *packet, void *ctx);     // full SP1:M:... line
     void (*on_confirm)(const char *intent, void *ctx);
     void (*on_fail)(const char *intent, void *ctx);
+    void (*on_wallet)(const char *address, uint64_t lamports, void *ctx);
+    void (*on_id_request)(void *ctx);
     void *ctx;
 } spconsole_cbs_t;
 
@@ -39,6 +48,8 @@ void spconsole_init(const spconsole_cbs_t *cbs, const char *role);
 void spconsole_emit(const char *kind, const char *fields);
 // The approval line the laptop settles on. Unchanged from the Lua apps.
 void spconsole_approval(const char *intent, const char *badge_id, const char *nonce);
+// SOLARPAY_BADGE:<role>:<badge_id> -- the identity line the website parses.
+void spconsole_identity(const char *role, const char *badge_id);
 // True while the laptop has spoken to us recently.
 bool spconsole_laptop_online(void);
 
