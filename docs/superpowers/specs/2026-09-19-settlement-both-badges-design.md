@@ -133,12 +133,18 @@ component.
 
 ## Testing
 
-- `test/flow.test.js`: settlement refreshes both balances; the confirm line carries the
-  payer lamports; `SP_CONFIRM` parses with two fields and with three.
-- `test/splink.test.lua`: the `C:` relay deducts and stores the hash; a mismatched
-  intent is ignored; `X:` and the timeout both leave the balance untouched.
-- Manual, on the two-badge rig: pay once, confirm the sender balance drops by the
-  amount plus fee and the hash matches the merchant's.
+Corrected during implementation. `test/splink.test.lua` exercises the Lua link layer in
+`badges/lib/splink.lua`; the relay lives in the C firmware and is not reachable from it.
+The split is therefore:
+
+- `test/badge-serial.test.js` (host, automated): the confirm line carries the signature
+  and the payer's balance; a confirm with only a signature, and one with only an intent,
+  both still settle. This covers the wire format the firmware parses.
+- `tools/e2e/scenarios.js` (needs the two-badge rig): settlement reaches the sender --
+  balance deducted to the relayed figure, hash matching the merchant's, and the merchant
+  releasing the link afterwards; and a failed settlement leaving the balance untouched.
+- The C parse of `SP_CONFIRM`'s third field has no host-level test. It is covered only by
+  the e2e rig, because the firmware does not build for the host.
 
 ## Risks
 
