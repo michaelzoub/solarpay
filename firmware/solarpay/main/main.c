@@ -591,8 +591,8 @@ static void paint(void)
             branch = "merchant/live";
             m.state = "Live"; m.state_color = UI_BUTTER;
             m.orb = UI_ORB_SEEKING;
-            snprintf(s_buf_detail, sizeof(s_buf_detail), "%s · waiting for a payer", s_item);
-            m.detail = s_note[0] ? s_note : s_buf_detail;
+            m.value = s_item;
+            m.detail = s_note[0] ? s_note : s_buf_value;
         }
         m.footer = "B  cancel";
         render_traced(branch, &m); return;
@@ -607,7 +607,7 @@ static void paint(void)
         if (idling() && online) {
             m.orb = UI_ORB_CALM;
             m.value = "Ready";
-            m.detail = "create a payment on the laptop";
+            m.detail = "waiting for terminal";
             render_traced(branch, &m); return;
         }
         branch = "merchant/till";
@@ -938,7 +938,7 @@ static void on_intent_line(const char *pkt, void *ctx)
     spconsole_emit("intent_loaded", f);
     snprintf(f, sizeof(f), "intent=%s", s_intent);
     spconsole_emit("broadcast_requested", f);
-    snprintf(s_note, sizeof(s_note), "WAITING FOR PAYER");
+    s_note[0] = '\0';
     request_paint();
 }
 

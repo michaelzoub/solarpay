@@ -1,0 +1,59 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bloomA" cx="10%" cy="8%" r="55%">
+      <stop offset="0%" stop-color="#7b4aee" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#7b4aee" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="bloomB" cx="92%" cy="96%" r="55%">
+      <stop offset="0%" stop-color="#17915c" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#17915c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="coin" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8f63f2"/>
+      <stop offset="100%" stop-color="#5b2fc9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background: same canvas + two blooms as the website -->
+  <rect width="1200" height="630" fill="#f3effc"/>
+  <rect width="1200" height="630" fill="url(#bloomA)"/>
+  <rect width="1200" height="630" fill="url(#bloomB)"/>
+
+  <!-- badge A (payer) -->
+  <g transform="rotate(-9 420 250)">
+    <rect x="290" y="90" width="260" height="320" rx="36" fill="#fcfaff" stroke="#5b2fc9" stroke-width="7"/>
+    <circle cx="420" cy="130" r="9" fill="none" stroke="#c9b6f5" stroke-width="6"/>
+    <line x1="335" y1="200" x2="505" y2="200" stroke="#e5ddf7" stroke-width="10" stroke-linecap="round"/>
+    <line x1="335" y1="236" x2="465" y2="236" stroke="#e5ddf7" stroke-width="10" stroke-linecap="round"/>
+    <!-- radio waves toward the other badge -->
+    <path d="M566 250 a34 34 0 0 1 0 60" fill="none" stroke="#7b4aee" stroke-width="7" stroke-linecap="round"/>
+    <path d="M596 234 a66 66 0 0 1 0 92" fill="none" stroke="#7b4aee" stroke-width="7" stroke-linecap="round" opacity="0.55"/>
+  </g>
+
+  <!-- badge B (merchant) -->
+  <g transform="rotate(9 780 250)">
+    <rect x="650" y="90" width="260" height="320" rx="36" fill="#fcfaff" stroke="#5b2fc9" stroke-width="7"/>
+    <circle cx="780" cy="130" r="9" fill="none" stroke="#c9b6f5" stroke-width="6"/>
+    <line x1="695" y1="200" x2="865" y2="200" stroke="#e5ddf7" stroke-width="10" stroke-linecap="round"/>
+    <line x1="735" y1="236" x2="865" y2="236" stroke="#e5ddf7" stroke-width="10" stroke-linecap="round"/>
+    <!-- radio waves toward the other badge -->
+    <path d="M634 250 a34 34 0 0 0 0 60" fill="none" stroke="#7b4aee" stroke-width="7" stroke-linecap="round"/>
+    <path d="M604 234 a66 66 0 0 0 0 92" fill="none" stroke="#7b4aee" stroke-width="7" stroke-linecap="round" opacity="0.55"/>
+  </g>
+
+  <!-- knock spark where the two badges meet -->
+  <g stroke="#5b2fc9" stroke-width="5" stroke-linecap="round">
+    <line x1="600" y1="250" x2="600" y2="222"/>
+    <line x1="600" y1="250" x2="576" y2="266"/>
+    <line x1="600" y1="250" x2="624" y2="266"/>
+  </g>
+
+  <!-- SOL moving from payer to merchant -->
+  <path d="M470 175 Q 600 120 730 175" fill="none" stroke="#8f63f2" stroke-width="4" stroke-dasharray="2 12" stroke-linecap="round"/>
+  <circle cx="730" cy="175" r="38" fill="url(#coin)"/>
+  <text x="730" y="185" font-family="Inter, ui-sans-serif, sans-serif" font-size="24" font-weight="700" fill="#ffffff" text-anchor="middle">SOL</text>
+
+  <!-- wordmark -->
+  <text x="600" y="522" font-family="Inter, ui-sans-serif, sans-serif" font-size="76" font-weight="700" letter-spacing="-2" fill="#16141c" text-anchor="middle">SolarPay</text>
+  <text x="600" y="568" font-family="Inter, ui-sans-serif, sans-serif" font-size="27" fill="#6b6479" text-anchor="middle">Tap two badges. One pays the other in SOL.</text>
+</svg>

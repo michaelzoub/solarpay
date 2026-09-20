@@ -261,6 +261,7 @@ code { font-family: var(--mono); }
 .ready { width: min(420px, 100%); margin: 18px auto 0; }
 .ready-head { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
 .ready-head code { color: var(--faint); font-size: 12px; }
+.wallet-address { display: block; margin-top: 6px; overflow-wrap: anywhere; color: var(--faint); font-size: 11px; line-height: 1.5; text-align: center; }
 .wallet { display: flex; align-items: center; justify-content: space-between; gap: 22px; margin-top: 18px; padding: 22px 24px; border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: var(--soft); text-align: left; }
 .wallet-balance small { display: block; color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
 .wallet-balance strong { display: flex; align-items: baseline; gap: 7px; margin-top: 8px; font-family: var(--mono); font-size: 30px; font-weight: 500; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
@@ -301,29 +302,50 @@ code { font-family: var(--mono); }
 .invite-connect .invite-plus svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .invite-connect .invite-plus { padding-bottom: 0; }
 
-/* ------------------------------------------------ merchant: focused request */
+/* -------------------------------------------- merchant: kiosk takeover */
 
-.focus {
-  width: min(460px, 100%); margin: 26px auto 0; padding: 34px 30px 30px;
-  border: 1px solid var(--line); border-radius: 26px;
-  background: var(--paper); box-shadow: var(--lift);
+/* The whole viewport becomes the payment status once a request is active --
+   a tap deserves the full screen's attention, not a card competing with the
+   topbar and role switcher for it. Same light canvas as the rest of the
+   site, just full-bleed; only the hero circle changes color per state. */
+.kiosk {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; padding: 40px 24px; text-align: center;
+  background:
+    radial-gradient(640px circle at 10% 6%, rgba(123, 74, 238, .09), transparent 60%),
+    radial-gradient(600px circle at 92% 96%, rgba(23, 145, 92, .08), transparent 60%),
+    var(--canvas);
 }
-.focus-pend { border-color: var(--pend-line); background: linear-gradient(180deg, var(--pend-wash), var(--paper) 46%); }
-.focus-wait { border-color: var(--wait-line); background: linear-gradient(180deg, var(--wait-wash), var(--paper) 46%); }
-.focus-ok { border-color: var(--ok-line); background: linear-gradient(180deg, var(--ok-wash), var(--paper) 46%); }
-.focus-stop { border-color: var(--stop-line); background: linear-gradient(180deg, var(--stop-wash), var(--paper) 46%); }
 
-.focus .art { margin: 22px auto 2px; width: min(250px, 78%); }
+.kiosk-icon {
+  display: grid; place-items: center;
+  width: 128px; height: 128px; margin-bottom: 6px;
+  border-radius: 50%; border: 1px solid var(--line);
+  background: var(--paper); box-shadow: var(--lift);
+  transition: background .25s ease, border-color .25s ease;
+}
+.kiosk-icon svg { width: 50px; height: 50px; fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.kiosk-wait .kiosk-icon, .kiosk-pend .kiosk-icon { border-color: var(--wait-line); }
+.kiosk-ok .kiosk-icon { background: var(--ok); border-color: var(--ok); }
+.kiosk-stop .kiosk-icon { background: var(--stop); border-color: var(--stop); }
+.kiosk-ok .kiosk-icon svg, .kiosk-stop .kiosk-icon svg { stroke: #fff; stroke-width: 2.4; }
+
+.kiosk-title { margin: 6px 0 0; font-family: var(--display); font-size: clamp(22px, 4vw, 28px); font-weight: 600; letter-spacing: -.02em; }
+.kiosk-stop .kiosk-title { color: var(--stop); }
+
+.kiosk .art { margin: 0 auto; width: min(190px, 60%); }
 .focus-item { margin: 16px 0 0; color: var(--muted); font-size: 15px; font-weight: 500; }
-.focus-amount { display: flex; align-items: baseline; justify-content: center; gap: 10px; margin: 6px 0 0; font-family: var(--mono); font-size: clamp(36px, 8vw, 50px); font-weight: 500; letter-spacing: -.045em; font-variant-numeric: tabular-nums; }
+.focus-amount { display: flex; align-items: baseline; justify-content: center; gap: 10px; margin: 6px 0 0; font-family: var(--mono); font-size: clamp(30px, 6vw, 40px); font-weight: 500; letter-spacing: -.045em; font-variant-numeric: tabular-nums; }
 .focus-amount em { color: var(--faint); font-family: var(--body); font-size: 15px; font-style: normal; font-weight: 600; letter-spacing: 0; }
-.focus-hint { margin-top: 14px; }
+.kiosk-motion { margin-top: 4px; }
+.focus-hint { margin-top: 16px; }
 .focus-hint p { margin: 0; color: var(--muted); font-size: 14.5px; line-height: 1.5; }
 .focus-hint p b { color: var(--ink); font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .focus-hint code { display: block; margin-top: 10px; overflow-wrap: anywhere; color: var(--faint); font-size: 11px; line-height: 1.5; }
 .focus-hint a { display: inline-block; margin-top: 8px; font-size: 13.5px; font-weight: 500; }
-.focus-stop .focus-hint p { color: var(--stop); }
-.focus-actions { margin-top: 24px; }
+.kiosk-stop .focus-hint p { color: var(--stop); }
+.focus-actions { margin-top: 28px; }
 .focus-actions .ghost { min-width: 190px; height: 48px; }
 
 /* ------------------------------------------------------- checkout sheet */
@@ -400,6 +422,7 @@ code { font-family: var(--mono); }
 
 .note { max-width: 420px; margin: 20px auto 0; color: var(--muted); font-size: 13.5px; line-height: 1.55; }
 .note-error { color: var(--stop); }
+.note-faucet { margin-top: 10px; color: var(--faint); font-size: 12.5px; }
 .device-panel .note, .drawer-body .note { max-width: none; margin: 12px 0 0; font-size: 12.5px; text-align: left; }
 .empty { display: block; margin: 14px 0; color: var(--faint); font-size: 13px; }
 .foot { margin-top: 44px; color: var(--faint); font-size: 12px; text-align: center; }
@@ -413,7 +436,8 @@ code { font-family: var(--mono); }
   .stage { padding-top: 30px; }
   .wallet { flex-direction: column; align-items: flex-start; }
   .wallet-qr { align-self: center; }
-  .focus { padding: 30px 20px 24px; }
+  .kiosk { padding: 30px 20px 24px; }
+  .kiosk-icon { width: 108px; height: 108px; }
   .sheet { padding: 28px 20px 22px; }
   .ledger li { grid-template-columns: 8px minmax(0, 1fr) auto; }
   .ledger a, .ledger .muted { grid-column: 2 / -1; }

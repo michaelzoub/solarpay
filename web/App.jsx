@@ -61,6 +61,10 @@ function Tick() {
   return <svg className="tick" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" /></svg>;
 }
 
+function Cross() {
+  return <svg className="tick" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17" /></svg>;
+}
+
 /* ------------------------------------------------------- signature: tap art */
 
 /** The one memorable element: two badges and the radio between them.
@@ -909,6 +913,7 @@ export function App() {
 
         {badgeReady && <div className="ready">
           <div className="ready-head"><span className="pill pill-ok"><i />Connected</span><code>{syncedBadge.badgeId}</code></div>
+          <code className="wallet-address">{syncedBadge.solanaAddress}</code>
           <div className="wallet">
             <div className="wallet-balance">
               <small>Balance</small>
@@ -923,6 +928,7 @@ export function App() {
             <button className="ghost" onClick={fundSender} disabled={syncBusy}>{syncBusy ? "Requesting…" : "Add test SOL"}</button>
             <button className="link" onClick={refreshBalance} disabled={syncBusy}>Refresh</button>
           </div>
+          {network !== "MOCK" && <p className="note note-faucet">Airdrop not landing? Fund this wallet with the <a href={DEVNET_FAUCET_URL} target="_blank" rel="noreferrer">Solana faucet ↗</a>, then refresh.</p>}
         </div>}
 
         {setupMessage && <p className="note">{setupMessage}</p>}
@@ -967,11 +973,13 @@ export function App() {
           </button>}
       </>}
 
-      {journey === "merchant" && requestActive && <div className={`focus focus-${tone}`} ref={focusPanel} aria-live="polite">
-        <span className={`pill pill-${tone}`}><i />{toneLabel}</span>
-        <TapArt mode={artMode} />
+      {journey === "merchant" && requestActive && <div className={`kiosk kiosk-${tone}`} ref={focusPanel} aria-live="polite">
+        <div className="kiosk-icon">{tone === "ok" ? <Tick /> : tone === "stop" ? <Cross /> : <BadgeGlyph />}</div>
+        <h2 className="kiosk-title">{toneLabel}</h2>
         <p className="focus-item">{memo || "Payment"}</p>
-        <h2 className="focus-amount">{liveAmount.toLocaleString(undefined, { maximumFractionDigits: 9 })}<em>SOL</em></h2>
+        <p className="focus-amount">{liveAmount.toLocaleString(undefined, { maximumFractionDigits: 9 })}<em>SOL</em></p>
+
+        {tone !== "ok" && tone !== "stop" && <div className="kiosk-motion"><TapArt mode={artMode} /></div>}
 
         <div className="focus-hint">
           {!error && step === 2 && <p>Hold the sender badge near this terminal. <b>{remaining}s</b> left.</p>}
