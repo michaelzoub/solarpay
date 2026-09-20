@@ -1,0 +1,22 @@
+menu "SolarPay"
+
+config SOLARPAY_TEST_HARNESS
+    bool "Enable the serial test harness (SP_TEST_*)"
+    default n
+    help
+      Adds SP_TEST_IMPACT, SP_TEST_BTN and SP_TEST_STATE to the serial console
+      so an automated harness on a laptop can drive the pairing and approval
+      flow that normally needs a physical knock and a physical button press.
+
+      This exists because the two acts that gate a payment -- knocking the
+      badges together and pressing A -- have no other injection point, which
+      makes the end-to-end flow untestable without a pair of hands. It drives
+      the real state machine and the real ESP-NOW radio; only the accelerometer
+      and 74HC165 drivers are bypassed, so those still need a manual pass.
+
+      SP_TEST_BTN reaches the same approve() that the A button reaches. Shipping
+      a build with this enabled would let anything that can write to the USB
+      console approve a payment. Default n, and it must stay that way: turn it
+      on only through sdkconfig.test, never sdkconfig.defaults.
+
+endmenu

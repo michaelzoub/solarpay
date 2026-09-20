@@ -87,6 +87,21 @@ export class BadgeSerialClient extends EventTarget {
   matchBuffer = "";
   installing = false;
 
+  constructor() {
+    super();
+    this.handleDeviceDisconnect = this.handleDeviceDisconnect.bind(this);
+  }
+
+  // Chrome fires this on navigator.serial (never on the port) when the OS
+  // reports the USB device gone. On some driver/OS combinations a pending
+  // reader.read() never rejects after physical removal, so without this the
+  // read loop's own cleanup never runs: `port` stays truthy and connect()'s
+  // early return means plugging the badge back in never reopens the picker.
+  handleDeviceDisconnect(event) {
+    if (event.target !== this.port) return;
+    void this.disconnect();
+  }
+
   async connect() {
     if (!webSerialSupported()) throw new Error("Web Serial requires desktop Chrome or Edge.");
     if (this.port) return this.info();
@@ -97,6 +112,7 @@ export class BadgeSerialClient extends EventTarget {
     this.port = port;
     this.writer = port.writable.getWriter();
     this.disconnecting = false;
+    navigator.serial.addEventListener("disconnect", this.handleDeviceDisconnect);
     this.emitStatus("connected", "Listening at 115200 baud.");
     this.readTask = this.readLoop();
     return this.info();
@@ -104,6 +120,7 @@ export class BadgeSerialClient extends EventTarget {
 
   async disconnect() {
     this.disconnecting = true;
+    if (webSerialSupported()) navigator.serial.removeEventListener("disconnect", this.handleDeviceDisconnect);
     try { await this.reader?.cancel(); } catch {}
     try { await this.readTask; } catch {}
     try { this.writer?.releaseLock(); } catch {}

@@ -1,20 +1,24 @@
 @import url("https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap");
 
 :root {
+  /* Light purple. One ramp, shared byte for byte with the badge screens in
+     firmware/solarpay/components/ui/include/ui.h -- the website and the badge
+     in your hand should read as one product, not two that happen to agree. */
   --ink: #16141c;
-  --muted: #6c6875;
-  --faint: #97929f;
-  --line: #e7e5ec;
-  --hair: #f0eef4;
-  --paper: #ffffff;
-  --canvas: #f6f5f8;
-  --accent: #6d3bee;
-  --accent-deep: #5a2ad6;
-  --accent-wash: #f1ecfe;
+  --muted: #6b6479;
+  --faint: #9c94ae;
+  --line: #e5ddf7;
+  --hair: #efeaf9;
+  --paper: #fcfaff;
+  --canvas: #f3effc;
+  --accent: #7b4aee;
+  --accent-soft: #c9b6f5;   /* the light purple itself: fills and edges under dark type */
+  --accent-deep: #5b2fc9;
+  --accent-wash: #efe8fd;
 
   /* One tone per payment state. */
   --ok: #17915c;      --ok-wash: #e8f5ee;   --ok-line: #c2e4d1;
-  --wait: #6d3bee;    --wait-wash: #f1ecfe; --wait-line: #dbcefb;
+  --wait: #7b4aee;    --wait-wash: #efe8fd; --wait-line: #d8c9fa;
   --pend: #a86a05;    --pend-wash: #fdf3de; --pend-line: #f0dbaa;
   --stop: #c0392f;    --stop-wash: #fbeceb; --stop-line: #f2cbc7;
 
@@ -35,7 +39,15 @@
 
 * { box-sizing: border-box; }
 html { min-width: 320px; background: var(--canvas); }
-body { margin: 0; min-height: 100vh; background: var(--canvas); color: var(--ink); }
+/* Two quiet blooms in the brand's own colours, not a flat void behind the
+   card -- the same purple/mint the badge itself breathes in. */
+body {
+  margin: 0; min-height: 100vh; color: var(--ink);
+  background:
+    radial-gradient(640px circle at 10% 6%, rgba(123, 74, 238, .09), transparent 60%),
+    radial-gradient(600px circle at 92% 96%, rgba(23, 145, 92, .08), transparent 60%),
+    var(--canvas);
+}
 button, input { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
 a { color: var(--accent); text-decoration: none; }
@@ -44,9 +56,12 @@ code { font-family: var(--mono); }
 
 /* The header spans the viewport; everything below it keeps the reading column.
    Centring is applied per section rather than on .shell so the topbar can be
-   full-bleed without a 100vw/negative-margin hack that fights the scrollbar. */
-.shell { width: 100%; margin: 0; padding: 22px 0 80px; }
-.shell > *:not(.topbar) { width: min(720px, calc(100% - 40px)); margin-inline: auto; }
+   full-bleed without a 100vw/negative-margin hack that fights the scrollbar.
+   The body sits in .shell-body, which centres vertically too -- a single
+   card floating top-left of a wide window reads as unfinished, not minimal. */
+.shell { width: 100%; margin: 0; min-height: 100vh; display: flex; flex-direction: column; padding: 22px 0 40px; }
+.shell-body { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 24px 0; }
+.shell-body > * { width: min(720px, calc(100% - 40px)); margin-inline: auto; }
 
 /* ------------------------------------------------------------------ header */
 
@@ -77,7 +92,7 @@ code { font-family: var(--mono); }
   cursor: pointer; transition: border-color .18s, box-shadow .18s;
 }
 .role-trigger:hover { border-color: #d7d3e0; }
-.role-trigger.is-open { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(109, 59, 238, .12); }
+.role-trigger.is-open { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(123, 74, 238, .12); }
 .role-trigger-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: var(--accent-wash); color: var(--accent); }
 .role-trigger-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .role-trigger-text { display: grid; gap: 1px; text-align: left; }
@@ -119,7 +134,7 @@ code { font-family: var(--mono); }
   cursor: pointer; transition: border-color .18s, box-shadow .18s, background .18s;
 }
 .device-trigger:hover { border-color: #d7d3e0; }
-.device-trigger.is-open { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(109, 59, 238, .12); }
+.device-trigger.is-open { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(123, 74, 238, .12); }
 .device-trigger-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--hair); color: var(--muted); transition: background .18s, color .18s; }
 .device-trigger-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .device-trigger-text { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; letter-spacing: -.01em; }
@@ -155,39 +170,39 @@ code { font-family: var(--mono); }
 
 /* ------------------------------------------------------------------- stage */
 
-.stage { padding-top: 46px; text-align: center; }
+.stage { padding-top: 24px; text-align: center; }
 .stage h1 { margin: 0; font-family: var(--display); font-size: clamp(36px, 6.4vw, 54px); font-weight: 600; line-height: 1.04; letter-spacing: -.042em; }
 .lede { max-width: 420px; margin: 16px auto 0; color: var(--muted); font-size: 16px; line-height: 1.5; }
 
 /* --------------------------------------------------------- signature: art */
 
-.art { margin: 34px auto 6px; width: min(300px, 80%); }
+.art { margin: 22px auto 4px; width: min(300px, 80%); }
 .art svg { display: block; width: 100%; height: auto; overflow: visible; }
 .art-badge { fill: var(--paper); stroke: var(--line); stroke-width: 1.5; }
 .art-chip { fill: var(--hair); }
 .art-ring { fill: none; stroke: var(--line); stroke-width: 3; stroke-linecap: round; }
 .art-target { fill: var(--paper); stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 5 6; }
-.art-check path { fill: none; stroke: var(--ok); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; opacity: 0; }
+.art-check { opacity: 0; }
+.art-check circle { fill: var(--ok); }
+.art-check path { fill: none; stroke: #fff; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
 
 .art-listening .art-badge { stroke: var(--accent); }
 .art-listening .art-chip { fill: var(--accent-wash); }
 .art-listening .art-ring { stroke: var(--accent); }
 .art-listening .art-target { stroke: var(--accent); stroke-dasharray: none; }
 
-.art-done .art-badge, .art-done .art-target { stroke: var(--ok); stroke-dasharray: none; }
-.art-done .art-chip { fill: var(--ok-wash); }
-.art-done .art-check path { opacity: 1; }
+.art-done .art-check { opacity: 1; }
 
 /* -------------------------------------------------------------------- rail */
 
-.rail { position: relative; display: flex; justify-content: space-between; gap: 8px; width: min(380px, 100%); margin: 30px auto 0; padding: 0; list-style: none; }
+.rail { position: relative; display: flex; justify-content: space-between; gap: 8px; width: min(380px, 100%); margin: 18px auto 0; padding: 0; list-style: none; }
 .rail-track { position: absolute; top: 15px; left: 16.66%; right: 16.66%; height: 2px; background: var(--line); border-radius: 2px; }
 .rail-fill { display: block; width: 0; height: 100%; background: var(--accent); border-radius: 2px; }
 .rail li { position: relative; display: grid; justify-items: center; gap: 9px; flex: 1; min-width: 0; }
 .rail-node { display: grid; place-items: center; width: 30px; height: 30px; border: 1.5px solid var(--line); border-radius: 50%; background: var(--paper); color: var(--faint); font-size: 12px; font-weight: 600; }
 .rail-node .tick { width: 14px; height: 14px; }
 .rail li b { max-width: 100%; color: var(--faint); font-size: 12px; font-weight: 500; letter-spacing: -.01em; line-height: 1.3; text-align: center; text-wrap: balance; }
-.rail li.here .rail-node { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 4px rgba(109, 59, 238, .1); }
+.rail li.here .rail-node { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 4px rgba(123, 74, 238, .1); }
 .rail li.here b { color: var(--ink); font-weight: 600; }
 .rail li.done .rail-node { border-color: var(--accent); background: var(--accent); color: #fff; }
 .rail li.done b { color: var(--muted); }
@@ -243,7 +258,7 @@ code { font-family: var(--mono); }
 
 /* -------------------------------------------------------- sender: ready */
 
-.ready { width: min(420px, 100%); margin: 30px auto 0; }
+.ready { width: min(420px, 100%); margin: 18px auto 0; }
 .ready-head { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
 .ready-head code { color: var(--faint); font-size: 12px; }
 .wallet { display: flex; align-items: center; justify-content: space-between; gap: 22px; margin-top: 18px; padding: 22px 24px; border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: var(--soft); text-align: left; }
@@ -255,11 +270,17 @@ code { font-family: var(--mono); }
 .wallet-qr figcaption { color: var(--faint); font-size: 11px; font-weight: 500; }
 .ready-actions { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 14px; }
 
+/* Merchant's wallet card has no QR to pair with -- centre the balance alone
+   rather than leaving it stranded at the left edge of the row. */
+.wallet:has(> .wallet-balance:only-child) { justify-content: center; }
+.wallet:has(> .wallet-balance:only-child) .wallet-balance { text-align: center; }
+.wallet:has(> .wallet-balance:only-child) .wallet-balance strong { justify-content: center; }
+
 /* ------------------------------------------------- merchant: the invitation */
 
 .invite {
   display: grid; grid-template-columns: 50px 1fr auto; align-items: center; gap: 16px;
-  width: min(420px, 100%); margin: 40px auto 0; padding: 20px 22px;
+  width: min(420px, 100%); margin: 22px auto 0; padding: 20px 22px;
   border: 1px solid #e3daf9; border-radius: 20px;
   background: linear-gradient(135deg, var(--accent-wash) 0%, var(--paper) 72%);
   box-shadow: var(--soft);
@@ -274,6 +295,11 @@ code { font-family: var(--mono); }
 .invite-text small { color: var(--muted); font-size: 13px; }
 .invite-go { color: var(--accent); font-size: 18px; transition: transform .2s ease; }
 .invite:hover .invite-go { transform: translateX(3px); }
+
+/* Same card, different state: the merchant cannot take a payment until a badge
+   is set up, so the entry point asks for one instead of opening the sheet. */
+.invite-connect .invite-plus svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.invite-connect .invite-plus { padding-bottom: 0; }
 
 /* ------------------------------------------------ merchant: focused request */
 
@@ -312,7 +338,7 @@ code { font-family: var(--mono); }
   box-shadow: 0 30px 70px -24px rgba(58, 26, 128, .42);
 }
 .sheet-close { position: absolute; top: 16px; right: 16px; display: grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent; color: var(--faint); cursor: pointer; }
-.sheet-close:hover { background: rgba(109, 59, 238, .08); color: var(--accent); }
+.sheet-close:hover { background: rgba(123, 74, 238, .08); color: var(--accent); }
 .sheet-head { display: flex; align-items: center; gap: 13px; margin-bottom: 24px; }
 .sheet-mark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--accent); color: #fff; font-family: var(--display); font-size: 22px; line-height: 1; padding-bottom: 2px; }
 .sheet h2 { margin: 0; font-family: var(--display); font-size: 22px; font-weight: 600; letter-spacing: -.03em; }
@@ -380,7 +406,7 @@ code { font-family: var(--mono); }
 
 @media (max-width: 620px) {
   .shell { width: 100%; }
-  .shell > *:not(.topbar) { width: calc(100% - 32px); }
+  .shell-body > * { width: calc(100% - 32px); }
   .topbar { height: auto; flex-wrap: wrap; gap: 10px; padding: 14px 16px; }
   .topbar-right { flex-wrap: wrap; }
   .pop-panel { right: auto; left: 0; transform-origin: top left; }

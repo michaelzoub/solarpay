@@ -28,6 +28,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sdkconfig.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -39,6 +41,14 @@ typedef struct {
     void (*on_fail)(const char *intent, void *ctx);
     void (*on_wallet)(const char *address, uint64_t lamports, void *ctx);
     void (*on_id_request)(void *ctx);
+#if CONFIG_SOLARPAY_TEST_HARNESS
+    // Test harness only -- see main/Kconfig.projbuild. Absent from a shipping
+    // build, so a stray SP_TEST_ line on a real badge is an unknown command.
+    void (*on_test_impact)(uint16_t mg, void *ctx);
+    void (*on_test_btn)(const char *name, void *ctx);
+    void (*on_test_state)(void *ctx);
+    void (*on_test_reboot)(void *ctx);
+#endif
     void *ctx;
 } spconsole_cbs_t;
 
@@ -50,6 +60,13 @@ void spconsole_emit(const char *kind, const char *fields);
 void spconsole_approval(const char *intent, const char *badge_id, const char *nonce);
 // SOLARPAY_BADGE:<role>:<badge_id> -- the identity line the website parses.
 void spconsole_identity(const char *role, const char *badge_id);
+
+// The role that every subsequent SP_EVT is tagged with. The mode is chosen on
+// the home screen and can change at runtime, so the label spconsole_init() was
+// given at boot goes stale the moment it does -- which made every event from a
+// badge running as a sender read `role=merchant` in the trace. `role` must be a
+// string literal or otherwise outlive the console.
+void spconsole_set_role(const char *role);
 // True while the laptop has spoken to us recently.
 bool spconsole_laptop_online(void);
 

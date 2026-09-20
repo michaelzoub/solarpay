@@ -5,20 +5,26 @@ icon=GIVE
 api=2
 heap_kb=96
 wake_lock=1
-version=1.6.0
+version=2.0.0
 ]==]
+-- Paying is now two deliberate acts, not one. Knocking the badges together
+-- establishes an SPL1 link with exactly one merchant (badges/lib/splink.lua);
+-- the payment is only sent after the payer presses A on a screen naming that
+-- merchant and the amount. A tap on its own never moves money.
+--#include lib/splink.lua
 local profile_id="__SOLARPAY_BADGE_ID__"
 local wallet="__SOLARPAY_WALLET_ADDRESS__"
 local balance="__SOLARPAY_BALANCE__"
 local has_qr="__SOLARPAY_QR_AVAILABLE__"=="1"
-local radio_ok,seq,next_beacon=false,0,0
-local my_id,my_mac,beacon,wallet_label
+local radio_ok,seq=false,0
+local my_id,my_mac,wallet_label
 local intent,nonce,amount,item,expires=nil,nil,nil,"PAYMENT",0
 local merchant_mac,merchant_rssi,merchant_seen,merchant_zone=nil,nil,0,nil
+local link,link_state,link_note,confirming=nil,nil,nil,false
 local last_dropped,next_proximity_log=0,0
 local next_led=0
 local item_id,item_name,paid_until,paid_started,laptop_until=nil,nil,0,0,0
-local apkt,auntil,anext,next_tap=nil,0,0,0
+
 local view,qr="balance",nil
 local mode,state,kicker,value,detail,card,card_text,footer
 local C={ink=0x10091F,panel=0x21143D,purple=0x9A5CFF,pink=0xFF4FD8,
@@ -49,16 +55,26 @@ card:set_size(296,82); card:align("bottom_mid",0,-26)
 card_text:hidden(false); card_text:set_color(C.white); card_text:align("center",0,0)
 if qr then qr:hidden(true) end
 end
+-- Advisory only; see the matching note in solarpay_merchant.lua. splink decides
+-- who the counterparty is, using simultaneity and uniqueness as well as signal
+-- strength, because RSSI alone could not tell "touching" from "nearby".
 local function rssi_zone(rssi)
--- Widened from -55/-68: enclosure + lanyard attenuation on real badges reads
--- well below open-air BLE RSSI even edge-to-edge, so the tighter thresholds
--- never fired "near"/"touching" and bump approval silently rejected every time.
-if rssi >= -62 then return "touching" end
+if rssi >= splink.DEFAULTS.RSSI_GATE then return "touching" end
 if rssi >= -82 then return "near" end
 return "far"
 end
 local function merchant_near(now)
 return merchant_mac and now-merchant_seen < 2600 and merchant_zone~="far"
+end
+local function refresh_link_peer(now)
+if not link then return end
+local p=link:paired_peer() or link:best_peer()
+if not p then
+  if merchant_mac and now-merchant_seen>=2600 then merchant_mac,merchant_rssi,merchant_zone=nil,nil,nil end
+  return
+end
+merchant_mac,merchant_rssi,merchant_seen=p.mac,p.rssi,now
+merchant_zone=rssi_zone(p.rssi)
 end
 local function render_leds(now)
 badge.led.clear()
@@ -91,14 +107,21 @@ state:set_text("REQUEST"); state:set_color(C.yellow); mode:set_text("[ PAYMENT R
 kicker:set_text("PAY  ·  "..money(amount)); kicker:set_color(C.pink); kicker:align("top_mid",0,66)
 value:set_text(item); value:align("top_mid",0,89); detail:align("top_mid",0,116)
 card:set_color(C.panel); card:set_size(220,42); card:align("bottom_mid",0,-32)
-if merchant_near(now) then
+if confirming and link_state==splink.PAIRED then
+local peer=link:paired_peer()
+state:set_text("CONFIRM"); state:set_color(C.green)
+detail:set_text(link_note or "PRESS A TO PAY THIS MERCHANT")
+card:set_border(C.green,3)
+card_text:set_text("PAY "..money(amount).."\nTO "..(peer and peer.sid or "MERCHANT").."\nA CONFIRM    B CANCEL")
+footer:set_text("A CONFIRM   B CANCEL   HOME EXIT"); render_leds(now); return
+elseif merchant_near(now) then
 local touching=merchant_zone=="touching"
-detail:set_text(touching and "BADGES ALIGNED - BUMP NOW" or "< TAP LEFT EDGE ON MERCHANT")
-card:set_border(touching and C.green or C.cyan,3); card_text:set_text(touching and "BUMP OR A TO PAY" or "<<<  LEFT EDGE")
+detail:set_text(link_note or (touching and "BADGES ALIGNED - KNOCK NOW" or "< BRING TO MERCHANT LEFT EDGE"))
+card:set_border(touching and C.green or C.cyan,3); card_text:set_text(touching and "KNOCK TO PAIR" or "<<<  LEFT EDGE")
 else
-detail:set_text("CHECK ITEM AND AMOUNT"); card:set_border(C.yellow,2); card_text:set_text("A PAY    B DECLINE")
+detail:set_text(link_note or "CHECK ITEM AND AMOUNT"); card:set_border(C.yellow,2); card_text:set_text("KNOCK ON MERCHANT\nTHEN A TO PAY")
 end
-footer:set_text("A PAY   B DECLINE   HOME EXIT"); render_leds(now); return
+footer:set_text("B DECLINE   HOME EXIT"); render_leds(now); return
 end
 local online=now < laptop_until
 state:set_text(online and "ONLINE" or "OFFLINE"); state:set_color(online and C.cyan or C.purple)
@@ -121,24 +144,29 @@ end
 local function clear(kind)
 local old=intent
 intent,nonce,amount,item,expires=nil,nil,nil,"PAYMENT",0
-apkt,auntil,anext=nil,0,0
+confirming=false; link_state,link_note=nil,nil
+if link and link:armed() then link:disarm(splink.CANCELLED) end
 if kind then emit(kind,"intent="..tostring(old)) end
 paint(badge.sys.ms())
 end
+-- Called only from the A button, and only while paired. There is deliberately
+-- no path from "badges touched" straight to "paid".
 local function approve(method)
 if not intent then return end
 local now=badge.sys.ms()
-if not merchant_near(now) then
-emit("approval_rejected","reason=merchant_not_near|intent="..intent.."|zone="..tostring(merchant_zone).."|rssi="..tostring(merchant_rssi).."|age_ms="..tostring(merchant_mac and now-merchant_seen or -1))
-detail:set_text("MOVE CLOSER AND TAP AGAIN"); leds(255,35,65); return
+if not link or link.state~=splink.PAIRED then
+emit("approval_rejected","reason=not_paired|intent="..intent.."|state="..tostring(link and link.state))
+link_note="KNOCK THE BADGES TOGETHER FIRST"; leds(255,35,65); paint(now); return
 end
-local packet="SP1:A:"..intent..":"..string.sub(my_id,1,16)..":"..nonce
-if #packet > 44 then emit("approval_rejected","reason=packet_too_long"); return end
-if badge.radio.send(packet) then
-apkt,auntil,anext=packet,now+1800,now+250
-paid_until,paid_started=now+3000,now; emit("touch","method="..method.."|intent="..intent.."|peer_mac="..merchant_mac.."|rssi="..tostring(merchant_rssi))
-emit("approval_queued","intent="..intent.."|bytes="..#packet); paint(now)
-else emit("approval_send_failed","intent="..intent) end
+if link:sending() then emit("approval_rejected","reason=already_sending"); return end
+local message="A:"..intent..":"..string.sub(my_id,1,16)..":"..nonce
+local ok,why=link:send_message(message)
+if not ok then emit("approval_send_failed","intent="..intent.."|reason="..tostring(why)); return end
+local peer=link:paired_peer()
+paid_until,paid_started=now+3000,now
+link_note="SENDING APPROVAL..."
+emit("touch","method="..method.."|intent="..intent.."|peer_mac="..tostring(peer and peer.mac).."|rssi="..tostring(peer and peer.rssi))
+emit("approval_queued","intent="..intent.."|bytes="..#message); paint(now)
 end
 function on_enter(root)
 if string.sub(balance,1,2)=="__" then balance="--" end
@@ -157,22 +185,39 @@ local solana_logo=badge.ui.image(shell,"solana.bin"); solana_logo:align("bottom_
 badge.sys.log("SOLARPAY_BADGE:customer:"..my_id); emit("app_enter","badge_id="..my_id)
 radio_ok=badge.radio.enable()
 if radio_ok then
-my_mac=badge.radio.mac(); beacon="SP2:P:C:"..string.sub(my_id,1,16)
+my_mac=badge.radio.mac()
 emit("radio_ready","mac="..my_mac)
+link=splink.new({
+ms=function() return badge.sys.ms() end,
+send=function(p) return badge.radio.send(p) end,
+random=function(n) return badge.sys.random(n) end,
+log=function(l) badge.sys.log(l) end,
+},{role="S"})
+link:on("state",function(st) link_state=st; paint(badge.sys.ms()) end)
+link:on("impact",function(mag) emit("impact","mag="..mag) end)
+link:on("ambiguous",function(count)
+link_note="TOO MANY BADGES - TRY AGAIN"
+emit("approval_rejected","reason=ambiguous_tap|count="..count); paint(badge.sys.ms())
+end)
+link:on("paired",function(p)
+confirming=true; link_note=nil
+merchant_mac,merchant_rssi,merchant_seen=p.mac,p.rssi,badge.sys.ms()
+merchant_zone=rssi_zone(p.rssi)
+emit("peer_detected","peer_sid="..p.sid.."|peer_mac="..p.mac.."|rssi="..p.rssi.."|lid="..link.lid)
+paint(badge.sys.ms())
+end)
+link:on("sent",function()
+link_note="APPROVAL DELIVERED"; emit("approval_delivered","intent="..tostring(intent)); paint(badge.sys.ms())
+end)
+link:on("send_failed",function(code)
+paid_until=0; link_note="MERCHANT DID NOT ANSWER - PRESS A AGAIN"
+emit("approval_send_failed","intent="..tostring(intent).."|code="..code); paint(badge.sys.ms())
+end)
+link:on("closed",function() confirming=false; link_note="MERCHANT LEFT"; paint(badge.sys.ms()) end)
+link:on("expired",function() confirming=false; link_note="PAIRING WINDOW CLOSED"; paint(badge.sys.ms()) end)
 badge.radio.on_recv(function(mac,rssi,payload)
 if mac==my_mac or type(payload)~="string" then return end
-if string.sub(payload,1,8)=="SP2:P:M:" then
-local now=badge.sys.ms()
-if merchant_mac~=mac or not merchant_rssi then merchant_rssi=rssi else merchant_rssi=math.floor((merchant_rssi*3+rssi)/4) end
-local zone=rssi_zone(merchant_rssi); merchant_mac,merchant_seen=mac,now
-local changed=zone~=merchant_zone
-if changed or now>=next_proximity_log then
-next_proximity_log=now+1500; merchant_zone=zone
-emit("proximity","peer="..mac.."|rssi="..merchant_rssi.."|zone="..zone)
-if changed then paint(now) end
-end
-return
-end
+if string.sub(payload,1,4)==splink.VERSION then link:on_frame(mac,rssi,payload); return end
 if string.sub(payload,1,6)=="SP1:M:" then
 local a,b=string.match(payload,"^SP1:M:([0-9a-f]+):([A-Za-z0-9_-]+)$")
 if a then item_id,item_name=a,string.gsub(b,"_"," "); if intent==a then item=item_name; paint(badge.sys.ms()) end end
@@ -180,8 +225,15 @@ return
 end
 local a,b,c,d=string.match(payload,"^SP1:I:([0-9a-f]+):(%d+):(%d+):([A-Za-z0-9_-]+):[A-Za-z0-9_-]+$")
 if not a then if string.sub(payload,1,6)=="SP1:I:" then emit("intent_rejected","reason=invalid_format") end; return end
+local fresh=intent~=a
 intent,amount,nonce,expires=a,tonumber(b),d,badge.sys.ms()+math.min(tonumber(c),90)*1000
 item=item_id==a and item_name or "PAYMENT"; merchant_mac,merchant_rssi,merchant_seen=mac,rssi,badge.sys.ms(); merchant_zone=rssi_zone(rssi)
+-- A payment request is the only thing that opens a pairing window. The radio
+-- is not armed for pairing at any other time.
+if fresh and not link:armed() then
+local sid=link:arm(); confirming=false; link_note="KNOCK ON THE MERCHANT BADGE"
+emit("link_armed","intent="..a.."|sid="..sid)
+end
 emit("intent_received","intent="..a.."|lamports="..b.."|ttl="..c); paint(badge.sys.ms())
 end)
 else emit("radio_unavailable") end
@@ -189,21 +241,28 @@ paint(badge.sys.ms())
 end
 function on_tick()
 local now=badge.sys.ms()
-if apkt and now<auntil and now>=anext then anext=now+250; badge.radio.send(apkt)
-elseif apkt and now>=auntil then apkt=nil end
-if paid_until>0 and now>=paid_until then paid_until=0; clear(nil) end
+if link then
+local x,y,z=badge.sensor.accel()
+link:feed_accel(x,y,z,badge.sensor.tap())
+link:tick()
+local before=merchant_zone
+refresh_link_peer(now)
+if merchant_zone~=before then
+if merchant_zone then emit("proximity","peer="..tostring(merchant_mac).."|rssi="..tostring(merchant_rssi).."|zone="..merchant_zone)
+else emit("proximity_lost","peer="..tostring(merchant_mac)) end
+paint(now)
+elseif merchant_zone and now>=next_proximity_log then
+next_proximity_log=now+1500
+emit("proximity","peer="..tostring(merchant_mac).."|rssi="..tostring(merchant_rssi).."|zone="..merchant_zone)
+end
+end
+if paid_until>0 and now>=paid_until and link and not link:sending() then paid_until=0; clear(nil) end
 if laptop_until>0 and now>=laptop_until then laptop_until=0; emit("laptop_disconnected"); paint(now) end
 if radio_ok then
 local dropped=badge.radio.dropped()
 if dropped~=last_dropped then last_dropped=dropped; emit("radio_dropped","count="..dropped) end
 end
-if radio_ok and now>=next_beacon then next_beacon=now+750; badge.radio.send(beacon) end
 if intent and now>=expires then clear("intent_expired") end
-if merchant_mac and now-merchant_seen>=2600 then emit("proximity_lost","peer="..tostring(merchant_mac)); merchant_mac,merchant_rssi,merchant_seen,merchant_zone=nil,nil,0,nil; paint(now) end
-if now>=next_tap then
-local tapped=badge.sensor.tap(); local shaken=badge.sensor.shake()
-if tapped or shaken then next_tap=now+600; if intent then approve(tapped and "radio_tap" or "radio_shake") else emit("touch_unpaired","reason=no_payment_request") end end
-end
 if now>=next_led then next_led=now+75; render_leds(now) end
 end
 function on_button(button,kind)
@@ -214,7 +273,7 @@ if pressed then local was=now<laptop_until; laptop_until=now+45000; if not was t
 return
 end
 emit("button","button="..tostring(button).."|kind="..(pressed and "pressed" or "released")); if not pressed then return end
-if button==badge.input.BUTTON.A and intent then approve("button_a")
+if button==badge.input.BUTTON.A and intent then approve("button_a_confirm")
 elseif button==badge.input.BUTTON.B and intent then clear("intent_declined")
 elseif button==badge.input.BUTTON.B then view=view=="balance" and "send" or "balance"; emit("view_changed","view="..view); paint(now) end
 end

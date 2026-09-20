@@ -5,14 +5,21 @@ icon=SHOP
 api=2
 heap_kb=96
 wake_lock=1
-version=1.6.0
+version=2.0.0
 ]==]
+-- Approval no longer arrives as a bare broadcast that any badge could send.
+-- It travels over an SPL1 link, which is only established when this badge and
+-- the payer's badge were physically knocked together: see badges/lib/splink.lua.
+-- Everything the laptop consumes (the SP_EVT approval_received event and the
+-- SOLARPAY_APPROVAL: line) is unchanged.
+--#include lib/splink.lua
 local profile_id="__SOLARPAY_BADGE_ID__"
 local wallet="__SOLARPAY_WALLET_ADDRESS__"
-local radio_ok,seq,next_beacon,next_send=false,0,0,0
-local my_id,my_mac,beacon,wallet_label
+local radio_ok,seq,next_send=false,0,0
+local my_id,my_mac,wallet_label
 local intent,nonce,packet,item_packet,amount,item,expires=nil,nil,nil,nil,nil,"PAYMENT",0
 local payer_id,payer_mac,payer_rssi,payer_seen,payer_zone=nil,nil,nil,0,nil
+local link,link_state,link_note=nil,nil,nil
 local last_dropped,next_proximity_log=0,0
 local next_led=0
 local approved=nil
@@ -38,15 +45,31 @@ local function layout()
 kicker:align("top_left",12,66); value:align("top_left",12,84); detail:align("top_left",12,113)
 card:set_size(296,82); card:align("bottom_mid",0,-26); card_text:hidden(false); card_text:align("center",0,0)
 end
+-- RSSI is now advisory only: it drives the "how close am I" hint on screen. The
+-- decision to accept a payer is made by splink, which additionally requires
+-- that both badges felt the same knock at the same instant and that no other
+-- badge is an equally good match. Earlier versions gated approval on RSSI
+-- alone, which is why the thresholds kept having to be widened until they
+-- stopped meaning anything.
 local function rssi_zone(rssi)
--- Widened from -55/-68: enclosure + lanyard attenuation on real badges reads
--- well below open-air BLE RSSI even edge-to-edge, so the tighter thresholds
--- never fired "near"/"touching" and bump approval silently rejected every time.
-if rssi>=-62 then return "touching" end
+if rssi>=splink.DEFAULTS.RSSI_GATE then return "touching" end
 if rssi>=-82 then return "near" end
 return "far"
 end
 local function peer_near(now) return payer_mac and now-payer_seen<2600 and payer_zone~="far" end
+local function link_peer()
+if not link then return nil end
+return link:paired_peer() or link:best_peer()
+end
+local function refresh_link_peer(now)
+local p=link_peer()
+if not p then
+  if payer_mac and now-payer_seen>=2600 then payer_mac,payer_rssi,payer_zone=nil,nil,nil end
+  return
+end
+payer_mac,payer_rssi,payer_seen=p.mac,p.rssi,now
+payer_zone=rssi_zone(p.rssi)
+end
 local function render_leds(now)
 badge.led.clear()
 if now<result_until then
@@ -82,12 +105,14 @@ state:set_text("LIVE"); state:set_color(C.pink); mode:set_text("[ CHECKOUT READY
 kicker:set_text("PAYMENT  ·  "..money(amount)); kicker:set_color(C.yellow); kicker:align("top_mid",0,66)
 value:set_text(item); value:align("top_mid",0,88); detail:align("top_mid",0,116)
 card:set_color(C.panel); card:set_size(220,38); card:align("bottom_mid",0,-34)
-if peer_near(now) then
+if link_state==splink.PAIRED then
+detail:set_text(link_note or "PAYER PAIRED"); card:set_border(C.green,3); card_text:set_text("< CONFIRM ON PAYER >")
+elseif peer_near(now) then
 local touching=payer_zone=="touching"
-detail:set_text(touching and "BADGES ALIGNED - BUMP NOW" or "TAP SENDER ON RIGHT EDGE >")
-card:set_border(touching and C.green or C.cyan,3); card_text:set_text(touching and "< BUMP TO PAY >" or "RIGHT EDGE  >>>")
+detail:set_text(link_note or (touching and "BADGES ALIGNED - KNOCK NOW" or "BRING SENDER TO RIGHT EDGE >"))
+card:set_border(touching and C.green or C.cyan,3); card_text:set_text(touching and "< KNOCK TO PAIR >" or "RIGHT EDGE  >>>")
 else
-detail:set_text("WAITING FOR SENDER BADGE"); card:set_border(C.green,2); card_text:set_text("TAP ON RIGHT EDGE  >>>")
+detail:set_text(link_note or "WAITING FOR SENDER BADGE"); card:set_border(C.green,2); card_text:set_text("TAP ON RIGHT EDGE  >>>")
 end
 footer:set_text("B CANCEL   HOME EXIT"); render_leds(now); return
 end
@@ -100,6 +125,11 @@ end
 local function clear(kind)
 local old=intent; intent,nonce,packet,item_packet,amount,item,expires=nil,nil,nil,nil,nil,"PAYMENT",0
 approved=nil
+-- The pairing window closes with the intent: the radio should not stay armed
+-- for a checkout that no longer exists.
+if link and link:armed() then link:disarm(splink.CANCELLED) end
+link_state,link_note=nil,nil
+payer_mac,payer_rssi,payer_zone=nil,nil,nil
 if kind then emit(kind,"intent="..tostring(old)) end; paint(badge.sys.ms())
 end
 local function load_intent()
@@ -118,6 +148,11 @@ intent,amount,nonce=a,tonumber(b),d; item=itemRaw and string.gsub(itemRaw,"_"," 
 approved=nil; expires=badge.sys.ms()+math.min(tonumber(c),90)*1000
 packet="SP1:I:"..a..":"..b..":"..c..":"..d..":"..label
 item_packet=itemRaw and ("SP1:M:"..a..":"..itemRaw) or nil; next_send=0
+if link then
+local sid=link:arm()
+link_note="WAITING FOR PAYER"
+emit("link_armed","intent="..a.."|sid="..sid)
+end
 emit("intent_loaded","intent="..a.."|lamports="..b); emit("broadcast_requested","intent="..a); paint(badge.sys.ms())
 end
 function on_enter(root)
@@ -136,30 +171,50 @@ local solana_logo=badge.ui.image(shell,"solana.bin"); solana_logo:align("bottom_
 badge.sys.log("SOLARPAY_BADGE:merchant:"..my_id); emit("app_enter","badge_id="..my_id)
 radio_ok=badge.radio.enable()
 if radio_ok then
-my_mac=badge.radio.mac(); beacon="SP2:P:M:"..string.sub(my_id,1,16)
+my_mac=badge.radio.mac()
 emit("radio_ready","mac="..my_mac)
-badge.radio.on_recv(function(mac,rssi,payload)
-if mac==my_mac or type(payload)~="string" then return end
-if string.sub(payload,1,8)=="SP2:P:C:" then
-local now=badge.sys.ms()
-if payer_mac~=mac or not payer_rssi then payer_rssi=rssi else payer_rssi=math.floor((payer_rssi*3+rssi)/4) end
-local zone=rssi_zone(payer_rssi); payer_mac,payer_seen=mac,now
-local changed=zone~=payer_zone
-if changed or now>=next_proximity_log then
-next_proximity_log=now+1500; payer_zone=zone
-emit("proximity","peer="..mac.."|rssi="..payer_rssi.."|zone="..zone)
-if changed then paint(now) end
-end
-return
-end
-if string.sub(payload,1,6)~="SP1:A:" then return end
-local a,b,c=string.match(payload,"^SP1:A:([0-9a-f]+):([A-Za-z0-9_-]+):([A-Za-z0-9_-]+)$")
-if not a or a~=intent or c~=nonce then emit("approval_ignored","reason=intent_mismatch"); return end
+link=splink.new({
+ms=function() return badge.sys.ms() end,
+send=function(p) return badge.radio.send(p) end,
+random=function(n) return badge.sys.random(n) end,
+log=function(l) badge.sys.log(l) end,
+},{role="M"})
+link:on("state",function(st) link_state=st; paint(badge.sys.ms()) end)
+link:on("impact",function(mag) emit("impact","mag="..mag) end)
+link:on("ambiguous",function(count)
+link_note="TOO MANY BADGES - TRY AGAIN"
+emit("approval_ignored","reason=ambiguous_tap|count="..count); paint(badge.sys.ms())
+end)
+link:on("paired",function(p)
+local now=badge.sys.ms(); payer_mac,payer_rssi,payer_seen=p.mac,p.rssi,now
+payer_zone=rssi_zone(p.rssi); link_note="PAYER PAIRED - CONFIRM ON THEIR BADGE"
+emit("peer_detected","peer_sid="..p.sid.."|peer_mac="..p.mac.."|rssi="..p.rssi.."|lid="..link.lid)
+paint(now)
+end)
+link:on("closed",function() link_note="PAYER LEFT"; paint(badge.sys.ms()) end)
+link:on("expired",function() link_note="PAIRING WINDOW CLOSED"; paint(badge.sys.ms()) end)
+-- The only way an approval reaches this badge: over a link that both badges
+-- agreed to after being knocked together.
+link:on("message",function(text)
+local a,b,c=string.match(text,"^A:([0-9a-f]+):([A-Za-z0-9_-]+):([A-Za-z0-9_-]+)$")
+if not a then emit("approval_ignored","reason=malformed"); return end
+if a~=intent or c~=nonce then emit("approval_ignored","reason=intent_mismatch"); return end
 if approved==a then return end
 approved=a
-local now=badge.sys.ms(); payer_id,payer_mac,payer_rssi,payer_seen=b,mac,rssi,now; packet,item_packet=nil,nil; result,result_until,result_started="APPROVED",now+90000,now
-badge.sys.log("SOLARPAY_APPROVAL:"..payload); emit("touch","method=radio_approval|intent="..a.."|peer_badge_id="..b.."|peer_mac="..mac.."|rssi="..rssi)
-emit("approval_received","intent="..a.."|customer_badge_id="..b.."|nonce="..c.."|rssi="..rssi); paint(now)
+local now=badge.sys.ms(); payer_id=b; packet,item_packet=nil,nil
+result,result_until,result_started="APPROVED",now+90000,now
+local peer=link:paired_peer()
+local rssi=peer and peer.rssi or 0
+-- Same two lines the laptop has always parsed, so the settlement path and the
+-- website's approval_received handler are untouched.
+badge.sys.log("SOLARPAY_APPROVAL:SP1:A:"..a..":"..b..":"..c)
+emit("touch","method=splink|intent="..a.."|peer_badge_id="..b.."|peer_mac="..tostring(payer_mac).."|rssi="..rssi)
+emit("approval_received","intent="..a.."|customer_badge_id="..b.."|nonce="..c.."|rssi="..rssi)
+link:disarm(splink.OK); paint(now)
+end)
+badge.radio.on_recv(function(mac,rssi,payload)
+if mac==my_mac or type(payload)~="string" then return end
+link:on_frame(mac,rssi,payload)
 end)
 else emit("radio_unavailable") end
 paint(badge.sys.ms())
@@ -171,10 +226,26 @@ if radio_ok then
 local dropped=badge.radio.dropped()
 if dropped~=last_dropped then last_dropped=dropped; emit("radio_dropped","count="..dropped) end
 end
-if radio_ok and now>=next_beacon then next_beacon=now+750; badge.radio.send(beacon) end
+if link then
+local x,y,z=badge.sensor.accel()
+link:feed_accel(x,y,z,badge.sensor.tap())
+link:tick()
+local before=payer_zone
+refresh_link_peer(now)
+if payer_zone~=before then
+if payer_zone then emit("proximity","peer="..tostring(payer_mac).."|rssi="..tostring(payer_rssi).."|zone="..payer_zone)
+else emit("proximity_lost","peer="..tostring(payer_mac)) end
+paint(now)
+elseif payer_zone and now>=next_proximity_log then
+next_proximity_log=now+1500
+emit("proximity","peer="..tostring(payer_mac).."|rssi="..tostring(payer_rssi).."|zone="..payer_zone)
+end
+end
+-- The intent itself still goes out as a plain broadcast: the payer has to be
+-- able to read the amount before deciding to tap, which is deliberately not
+-- gated on pairing.
 if radio_ok and packet and now<expires and now>=next_send then next_send=now+450; badge.radio.send(packet); if item_packet then badge.radio.send(item_packet) end end
 if intent and now>=expires then clear("intent_expired") end
-if payer_mac and now-payer_seen>=2600 then emit("proximity_lost","peer="..tostring(payer_mac)); payer_mac,payer_rssi,payer_seen,payer_zone=nil,nil,0,nil; paint(now) end
 if now>=next_led then next_led=now+75; render_leds(now) end
 end
 function on_button(button,kind)
@@ -189,5 +260,6 @@ if button==badge.input.BUTTON.START then load_intent()
 elseif button==badge.input.BUTTON.B and intent then clear("intent_cancelled") end
 end
 function on_exit()
-emit("app_exit"); if radio_ok then badge.radio.on_recv(nil); badge.radio.disable() end; badge.led.clear(); badge.led.show()
+emit("app_exit"); if link then link:disarm(splink.CANCELLED) end
+if radio_ok then badge.radio.on_recv(nil); badge.radio.disable() end; badge.led.clear(); badge.led.show()
 end

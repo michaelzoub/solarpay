@@ -11,7 +11,16 @@
     "build": "vite build",
     "start": "node --env-file-if-exists=.env server/index.js",
     "test": "node --test",
-    "check": "npm test && npm run build"
+    "check": "npm test && npm run build",
+    "badge:build": "node tools/build-badge-apps.js",
+    "badge:install": "node tools/install-badge-app.js",
+    "badge:pair": "node tools/install-badge-app.js badges/solarpay_pair.lua",
+    "badge:apps": "node tools/install-badge-app.js badges/solarpay_customer.lua badges/solarpay_merchant.lua",
+    "badge:backup": "firmware/tools/badge-flash-backup.sh",
+    "test:lua": "lua test/splink.test.lua",
+    "badge:e2e": "node tools/e2e/run.js",
+    "badge:e2e:soak": "node tools/e2e/run.js --loops 5",
+    "badge:build:test": "cd firmware/solarpay && idf.py -DSDKCONFIG_DEFAULTS='sdkconfig.defaults;sdkconfig.test' build"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.23",

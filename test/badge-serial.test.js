@@ -268,3 +268,103 @@ test("role-specific app installation completes upload, reload, and reboot", asyn
   assert.ok(commands.includes("reboot"));
   assert.deepEqual(stages, ["syncing", "uploading", "uploading", "reloading", "restarting", "complete"]);
 });
+
+// The merchant badge knows its own balance and nothing about the payer's, so
+// the payer's post-settlement figure rides along with the confirmation and is
+// relayed over the radio link. A confirm that carries no balance must stay
+// valid: the badge then keeps the balance it already had.
+test("a confirmation carries the signature and the payer's balance to the badge", async () => {
+  const lines = [];
+  const client = new BadgeSerialClient();
+  client.writer = { write: async (bytes) => lines.push(new TextDecoder().decode(bytes).trim()) };
+
+  await client.pushCheckout("SP1:C:deadbeef 5xTestSignature 749000000\n");
+  assert.deepEqual(lines, ["SP_CONFIRM deadbeef 5xTestSignature 749000000"]);
+});
+
+test("a confirmation without a balance still settles the badge", async () => {
+  const lines = [];
+  const client = new BadgeSerialClient();
+  client.writer = { write: async (bytes) => lines.push(new TextDecoder().decode(bytes).trim()) };
+
+  await client.pushCheckout("SP1:C:deadbeef 5xTestSignature\n");
+  assert.deepEqual(lines, ["SP_CONFIRM deadbeef 5xTestSignature"]);
+
+  lines.length = 0;
+  await client.pushCheckout("SP1:C:deadbeef\n");
+  assert.deepEqual(lines, ["SP_CONFIRM deadbeef"]);
+});
+
+// On some driver/OS combinations, unplugging the badge leaves the read loop's
+// reader.read() pending forever instead of rejecting -- nothing ever clears
+// `port`, so a later connect() sees it still set and returns without ever
+// showing the device picker again. navigator.serial's own "disconnect" event
+// is the only signal that arrives promptly regardless of a stuck read.
+test("a physical unplug clears the connection even with a stuck pending read", async () => {
+  const makePort = () => ({
+    readable: new ReadableStream({ start() {} }), // never produces data or closes
+    writable: new WritableStream({ write() {} }),
+    async open() {},
+    async close() {},
+    getInfo: () => ({ usbVendorId: 0x303a, usbProductId: 0x1001 }),
+  });
+  const port = makePort();
+  const listeners = new Map();
+  const fakeSerial = {
+    requestPort: async () => port,
+    addEventListener: (type, handler) => listeners.set(type, handler),
+    removeEventListener: (type, handler) => { if (listeners.get(type) === handler) listeners.delete(type); },
+  };
+  const originalSerial = globalThis.navigator.serial;
+  globalThis.navigator.serial = fakeSerial;
+  try {
+    const client = new BadgeSerialClient();
+    const statuses = [];
+    client.addEventListener("status", ({ detail }) => statuses.push(detail.state));
+
+    await client.connect();
+    assert.equal(client.port, port);
+    assert.ok(listeners.has("disconnect"));
+
+    // handleDeviceDisconnect fires disconnect() without awaiting it (it is a
+    // DOM event handler in real use), so wait for the status it emits rather
+    // than for readTask, which settles before disconnect() finishes clearing
+    // the client's own fields.
+    const disconnected = new Promise((resolve) => {
+      client.addEventListener("status", function onStatus({ detail }) {
+        if (detail.state !== "disconnected") return;
+        client.removeEventListener("status", onStatus);
+        resolve();
+      });
+    });
+    listeners.get("disconnect")({ target: port });
+    await disconnected;
+
+    assert.equal(client.port, null);
+    assert.equal(statuses.at(-1), "disconnected");
+    assert.ok(!listeners.has("disconnect"));
+
+    // The picker must be offered again for the replugged badge (a distinct
+    // SerialPort instance, as a real reconnect would hand over), not skipped
+    // because a stale `port` from before the unplug is still set.
+    let requested = false;
+    const replugged = makePort();
+    fakeSerial.requestPort = async () => { requested = true; return replugged; };
+    await client.connect();
+    assert.ok(requested);
+    assert.equal(client.port, replugged);
+    await client.disconnect();
+  } finally {
+    globalThis.navigator.serial = originalSerial;
+  }
+});
+
+test("handleDeviceDisconnect ignores disconnect events for a different port", async () => {
+  const client = new BadgeSerialClient();
+  client.port = { getInfo: () => ({}) };
+  const statuses = [];
+  client.addEventListener("status", ({ detail }) => statuses.push(detail.state));
+  client.handleDeviceDisconnect({ target: { getInfo: () => ({}) } });
+  assert.deepEqual(statuses, []);
+  assert.ok(client.port);
+});

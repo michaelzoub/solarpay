@@ -51,10 +51,25 @@ extern "C" {
 // Wait this long after our own knock before deciding anything, so a second
 // candidate has time to announce itself and be refused.
 #define SPLINK_PAIR_SETTLE_MS   220
+// Transmit power. The default is the PHY maximum, 20 dBm, which is absurd for
+// a link measured in centimetres and is what browns the sender out on battery:
+// a beacon every BEACON_PERIOD_MS at full power is a ~300 mA burst landing on
+// top of the display DMA, and the badge resets. 11 dBm is ample for badges
+// being knocked together and cuts the burst substantially. In 0.25 dBm units,
+// as esp_wifi_set_max_tx_power() wants.
+#define SPLINK_TX_POWER_QDBM    44        // 11 dBm
+// How far SPLINK_TX_POWER_QDBM is below the 20 dBm default. Every RSSI figure
+// below is measured relative to transmit power, so dropping the power shifts
+// them all down by exactly this much and the thresholds must follow -- what
+// discriminates is the *relative* reading, which is unchanged.
+#define SPLINK_TX_POWER_DROP_DB 9
+
 // Coarse range filter only. Deliberately loose: this repo's history shows
-// badges held edge to edge reading below -62 dBm, so a tight gate would stop
-// pairing firing at all. Impact correlation is what actually discriminates.
-#define SPLINK_RSSI_GATE        (-70)
+// badges held edge to edge reading below -62 dBm at 20 dBm transmit power, so
+// a tight gate would stop pairing firing at all. Impact correlation is what
+// actually discriminates. Shifted down with the transmit power, so it keeps
+// the same margin it always had.
+#define SPLINK_RSSI_GATE        (-70 - SPLINK_TX_POWER_DROP_DB)
 // Arming expires by itself, so a badge is never quietly pairable.
 #define SPLINK_ARM_TIMEOUT_MS   20000
 // Pairing handshake must complete inside this.

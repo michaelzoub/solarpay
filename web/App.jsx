@@ -76,7 +76,7 @@ function TapArt({ mode }) {
     loop.current = null;
 
     const rings = Array.from(scope.querySelectorAll(".art-ring"));
-    const check = scope.querySelector(".art-check path");
+    const check = scope.querySelector(".art-check");
     gsap.killTweensOf(rings);
     if (check) gsap.killTweensOf(check);
     if (reduceMotion()) return undefined;
@@ -91,14 +91,10 @@ function TapArt({ mode }) {
       });
       loop.current = timeline;
     } else if (mode === "done") {
-      gsap.fromTo(rings,
-        { scale: 1.2, opacity: 0.9, transformOrigin: "left center" },
-        { scale: 0.4, opacity: 0, duration: 0.55, stagger: 0.05, ease: "power3.in" });
       if (check) {
-        const length = check.getTotalLength();
         gsap.fromTo(check,
-          { strokeDasharray: length, strokeDashoffset: length },
-          { strokeDashoffset: 0, duration: 0.5, delay: 0.24, ease: "power2.out" });
+          { scale: 0.3, opacity: 0, transformOrigin: "50% 50%" },
+          { scale: 1, opacity: 1, duration: 0.45, ease: "back.out(1.7)" });
       }
     } else {
       gsap.fromTo(rings,
@@ -111,15 +107,21 @@ function TapArt({ mode }) {
 
   return <div className={`art art-${mode}`} ref={root} aria-hidden="true">
     <svg viewBox="0 0 236 140">
-      <rect className="art-badge" x="4" y="44" width="56" height="52" rx="11" />
-      <rect className="art-chip" x="17" y="61" width="20" height="13" rx="3.5" />
-      <g className="art-rings">
-        <path className="art-ring" d="M72 54a24 24 0 0 1 0 32" />
-        <path className="art-ring" d="M89 43a40 40 0 0 1 0 54" />
-        <path className="art-ring" d="M106 32a56 56 0 0 1 0 76" />
-      </g>
-      <rect className="art-target" x="156" y="38" width="76" height="64" rx="14" />
-      <g className="art-check"><path d="m176 70 12 12 22-24" /></g>
+      {mode === "done" ? (
+        <g className="art-check">
+          <circle cx="118" cy="70" r="32" />
+          <path d="m103 70 11 11 19-22" />
+        </g>
+      ) : <>
+        <rect className="art-badge" x="4" y="44" width="56" height="52" rx="11" />
+        <rect className="art-chip" x="17" y="61" width="20" height="13" rx="3.5" />
+        <g className="art-rings">
+          <path className="art-ring" d="M72 54a24 24 0 0 1 0 32" />
+          <path className="art-ring" d="M89 43a40 40 0 0 1 0 54" />
+          <path className="art-ring" d="M106 32a56 56 0 0 1 0 76" />
+        </g>
+        <rect className="art-target" x="156" y="38" width="76" height="64" rx="14" />
+      </>}
     </svg>
   </div>;
 }
@@ -164,7 +166,7 @@ function StepRail({ steps, index, compact }) {
 
 /** Shared behaviour for the header popovers: GSAP in/out, outside click,
  *  Escape, and focus return. Children render inside the animated panel. */
-function Popover({ className, label, trigger, children }) {
+function Popover({ className, label, trigger, children, api }) {
   const [state, setState] = useState("closed"); // closed | open | closing
   const wrap = useRef(null);
   const panel = useRef(null);
@@ -172,6 +174,14 @@ function Popover({ className, label, trigger, children }) {
   const mounted = state !== "closed";
 
   const close = () => setState((current) => (current === "open" ? "closing" : current));
+
+  /* Lets the page open this popover -- the merchant gate points at the badge
+     control rather than duplicating its contents. */
+  useEffect(() => {
+    if (!api) return undefined;
+    api.current = { open: () => setState("open") };
+    return () => { api.current = null; };
+  }, [api]);
 
   useLayoutEffect(() => {
     if (!panel.current) return undefined;
@@ -300,6 +310,7 @@ export function App() {
   const focusPanel = useRef(null);
   const checkoutDialog = useRef(null);
   const checkoutClosing = useRef(false);
+  const deviceApi = useRef(null);
 
   /* ------------------------------------------------------------- animation */
 
@@ -617,6 +628,17 @@ export function App() {
     finally { setSyncBusy(false); }
   }
 
+  // A balance read that leaves the connected-badge panel alone. syncBadge() owns
+  // syncedBadge, balance and qrCode; calling it for the payer would swap the
+  // header wallet over to the sender's.
+  async function readBadgeLamports(badgeId) {
+    if (!badgeId) return null;
+    try {
+      const info = await request(`/badges/${badgeId}/balance`, {}, apiKey);
+      return info.lamports ?? Math.round((info.sol || 0) * 1e9);
+    } catch { return null; }
+  }
+
   async function fundSender() {
     if (!syncedBadge || !(syncedBadge.role === "customer" || syncedBadge.roles?.includes("customer"))) return;
     setSyncBusy(true); setSetupMessage("");
@@ -661,15 +683,22 @@ export function App() {
       const submitted = await request(`/intents/${current.id}/submit`, { method: "POST", body: JSON.stringify({ signedTransaction: approval.signedTransaction }) }, apiKey);
       setIntent(submitted.intent); activeIntent.current = submitted.intent; setStep(5);
       await loadTransactions();
+      // The merchant badge knows its own balance and nothing about the payer's,
+      // so the authoritative figure rides along with the confirmation and the
+      // merchant relays it to the sender over the still-open radio link.
+      const payerLamports = await readBadgeLamports(fields.customer_badge_id);
       try {
         // Pass the Solana signature through so the badge can show the
         // transaction and print its devnet explorer URL.
-        await serialClient.current?.pushCheckout(`SP1:C:${current.id} ${submitted.intent?.signature || ""}\n`);
+        const balancePart = payerLamports === null ? "" : ` ${payerLamports}`;
+        await serialClient.current?.pushCheckout(`SP1:C:${current.id} ${submitted.intent?.signature || ""}${balancePart}\n`);
       } catch (receiptError) {
         setSerialMessage(`Payment confirmed, but the badge receipt update failed: ${receiptError.message}`);
       }
       const merchant = badges.find((badge) => badge.badgeId === current.terminalBadgeId);
       if (merchant) void syncBadge(merchant);
+      // Both sides moved, so the badge list behind the wallet panel is stale too.
+      void loadBadges();
     } catch (reason) {
       setError(reason.message);
       try { await serialClient.current?.pushCheckout(`SP1:E:${current.id}\n`); } catch {}
@@ -723,7 +752,7 @@ export function App() {
           : step === 4 ? "Submitting" : "Preparing request";
   const artMode = requestActive
     ? (error ? "idle" : step === 5 ? "done" : step >= 1 ? "listening" : "idle")
-    : badgeReady ? "done" : "idle";
+    : "idle";
 
   // Both role apps are installed on the one badge; which to open follows the
   // role selected in the header. Names match the manifests in badges/.
@@ -770,7 +799,7 @@ export function App() {
 
   /* ------------------------------------------------- persistent badge control */
 
-  const badgeControl = <Popover className="device" label="Badge device" trigger={({ ref, open, mounted, toggle }) => <button
+  const badgeControl = <Popover className="device" label="Badge device" api={deviceApi} trigger={({ ref, open, mounted, toggle }) => <button
     ref={ref}
     type="button"
     title={USB_HINT}
@@ -868,6 +897,7 @@ export function App() {
       </div>
     </header>
 
+    <div className="shell-body">
     <section className="stage" ref={stage} key={journey}>
       {journey === "sender" && <>
         <h1>Send money<br />with a tap.</h1>
@@ -901,13 +931,40 @@ export function App() {
 
       {journey === "merchant" && !requestActive && <>
         <h1>Take a payment.</h1>
-        <p className="lede">Name the item, set the price, and wait for a badge to tap.</p>
+        <p className="lede">{badgeReady
+          ? "Name the item, set the price, and wait for a badge to tap."
+          : "Connect your merchant badge to start taking payments."}</p>
 
-        <button className="invite" onClick={openCheckout}>
-          <span className="invite-plus" aria-hidden="true">+</span>
-          <span className="invite-text"><b>New payment request</b><small>Item and amount</small></span>
-          <span className="invite-go" aria-hidden="true">→</span>
-        </button>
+        <TapArt mode={artMode} />
+        <StepRail steps={DEVICE_STEPS} index={deviceIndex} />
+
+        {badgeReady && <div className="ready">
+          <div className="ready-head"><span className="pill pill-ok"><i />Connected</span><code>{syncedBadge.badgeId}</code></div>
+          <div className="wallet">
+            <div className="wallet-balance">
+              <small>Balance</small>
+              <strong>{syncBusy || !balance ? "—" : `${balance.sol.toLocaleString(undefined, { maximumFractionDigits: 9 })}`}<em>SOL</em></strong>
+            </div>
+          </div>
+          <div className="ready-actions">
+            <button className="link" onClick={refreshBalance} disabled={syncBusy}>Refresh</button>
+          </div>
+        </div>}
+
+        {/* Checkout needs terminalBadgeId, which only a finished setup provides.
+            Gating the entry point means the form can never be filled in for a
+            request that could not be sent. */}
+        {badgeReady
+          ? <button className="invite" onClick={openCheckout}>
+            <span className="invite-plus" aria-hidden="true">+</span>
+            <span className="invite-text"><b>New payment request</b><small>Item and amount</small></span>
+            <span className="invite-go" aria-hidden="true">→</span>
+          </button>
+          : <button className="invite invite-connect" onClick={() => deviceApi.current?.open()}>
+            <span className="invite-plus" aria-hidden="true"><BadgeGlyph /></span>
+            <span className="invite-text"><b>Connect your badge</b><small>Required to take payments</small></span>
+            <span className="invite-go" aria-hidden="true">→</span>
+          </button>}
       </>}
 
       {journey === "merchant" && requestActive && <div className={`focus focus-${tone}`} ref={focusPanel} aria-live="polite">
@@ -954,6 +1011,7 @@ export function App() {
     </section>}
 
     <footer className="foot">Wallet keys stay encrypted on this computer.</footer>
+    </div>
 
     <Dialog.Root open={checkoutOpen} onOpenChange={(open) => { if (!open) closeCheckout("dismiss"); }}>
       <Dialog.Portal>

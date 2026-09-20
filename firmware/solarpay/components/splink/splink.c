@@ -595,6 +595,14 @@ esp_err_t splink_init(splink_role_t role, const splink_cbs_t *cbs)
     // Never associate; just own the channel.
     ESP_ERROR_CHECK(esp_wifi_set_channel(SPLINK_CHANNEL, WIFI_SECOND_CHAN_NONE));
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    // Never left at the PHY default: see SPLINK_TX_POWER_QDBM. This is the
+    // single biggest current draw the badge adds when it arms.
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(SPLINK_TX_POWER_QDBM));
+    int8_t tx_qdbm = 0;
+    if (esp_wifi_get_max_tx_power(&tx_qdbm) == ESP_OK) {
+        ESP_LOGI(TAG, "tx power %d.%02d dBm, rssi gate %d dBm",
+                 tx_qdbm / 4, (tx_qdbm % 4) * 25, SPLINK_RSSI_GATE);
+    }
 
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(on_recv));

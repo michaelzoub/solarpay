@@ -4,3 +4,7 @@ data/
 .env
 *.log
 .DS_Store
+firmware/backup/
+firmware/**/build/
+firmware/**/managed_components/
+badges/build/

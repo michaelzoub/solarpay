@@ -46,6 +46,16 @@ static void handle_line(char *line)
         if (s_cbs.on_id_request) s_cbs.on_id_request(s_cbs.ctx);
     } else if (strcmp(line, "SP_PING") == 0) {
         spconsole_emit("laptop_connected", NULL);
+#if CONFIG_SOLARPAY_TEST_HARNESS
+    } else if (strncmp(line, "SP_TEST_IMPACT ", 15) == 0) {
+        if (s_cbs.on_test_impact) s_cbs.on_test_impact((uint16_t)strtoul(line + 15, NULL, 10), s_cbs.ctx);
+    } else if (strncmp(line, "SP_TEST_BTN ", 12) == 0) {
+        if (s_cbs.on_test_btn) s_cbs.on_test_btn(line + 12, s_cbs.ctx);
+    } else if (strcmp(line, "SP_TEST_STATE") == 0) {
+        if (s_cbs.on_test_state) s_cbs.on_test_state(s_cbs.ctx);
+    } else if (strcmp(line, "SP_TEST_REBOOT") == 0) {
+        if (s_cbs.on_test_reboot) s_cbs.on_test_reboot(s_cbs.ctx);
+#endif
     }
 }
 
@@ -86,6 +96,11 @@ void spconsole_init(const spconsole_cbs_t *cbs, const char *role)
     usb_serial_jtag_driver_install(&cfg);
 
     xTaskCreate(console_task, "spconsole", 3072, NULL, 5, NULL);
+}
+
+void spconsole_set_role(const char *role)
+{
+    if (role) s_role = role;
 }
 
 void spconsole_emit(const char *kind, const char *fields)
